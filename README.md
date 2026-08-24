@@ -2,6 +2,10 @@
 
 Apply focused AI edits to a Neovim buffer or visual selection through OpenCode. AI edit stages only the requested text, runs asynchronously, locks the target while work is active, and leaves a successful result unsaved and undoable with one `u`.
 
+## Demo
+
+https://github.com/user-attachments/assets/14ae0b69-2acf-4879-be1d-93a92c5b7d1a
+
 ## Requirements
 
 - Neovim 0.11 or newer.
