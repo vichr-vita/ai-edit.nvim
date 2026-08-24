@@ -1567,27 +1567,7 @@ local function decode_debug_output(result, label)
   return value
 end
 
-local function debug_environment(environment)
-  local result = {}
-  for name, value in pairs(environment) do
-    table.insert(result, name .. '=' .. tostring(value))
-  end
-  return result
-end
-
 local function run_debug(job, arguments, label, callback, cwd, environment)
-  local stdout_pipe = uv.new_pipe(false)
-  local stderr_pipe = uv.new_pipe(false)
-  if not stdout_pipe or not stderr_pipe then
-    if stdout_pipe then
-      stdout_pipe:close()
-    end
-    if stderr_pipe then
-      stderr_pipe:close()
-    end
-    return nil, 'cannot create bounded ' .. label .. ' output pipes'
-  end
-
   local stdout = { chunks = {}, bytes = 0, done = false }
   local stderr = { chunks = {}, bytes = 0, done = false }
   local output_errors = {}
@@ -1596,13 +1576,6 @@ local function run_debug(job, arguments, label, callback, cwd, environment)
   local exit_code
   local exit_signal
   local completed = false
-
-  local function close_pipe(pipe)
-    pcall(pipe.read_stop, pipe)
-    if not pipe:is_closing() then
-      pipe:close()
-    end
-  end
 
   local function kill_group(signal)
     if process_id then
@@ -1615,9 +1588,6 @@ local function run_debug(job, arguments, label, callback, cwd, environment)
       return
     end
     completed = true
-    if process and not process:is_closing() then
-      process:close()
-    end
     vim.schedule(function()
       local stderr_text = table.concat(stderr.chunks)
       if #output_errors > 0 then
@@ -1632,70 +1602,60 @@ local function run_debug(job, arguments, label, callback, cwd, environment)
     end)
   end
 
-  local function read_stream(pipe, state, name)
-    local started, start_error = pcall(pipe.read_start, pipe, function(error_message, data)
-      if state.done then
-        return
-      end
-      if error_message then
-        table.insert(output_errors, name .. ' read failed: ' .. tostring(error_message))
-        state.done = true
-        close_pipe(pipe)
-        kill_group(9)
-        complete()
-        return
-      end
-      if data then
-        local remaining = debug_output_max_bytes - state.bytes
-        if #data <= remaining then
-          table.insert(state.chunks, data)
-          state.bytes = state.bytes + #data
-        else
-          if remaining > 0 then
-            table.insert(state.chunks, data:sub(1, remaining))
-            state.bytes = debug_output_max_bytes
-          end
-          table.insert(output_errors, name .. ' exceeded ' .. debug_output_max_bytes .. ' bytes')
-          state.done = true
-          close_pipe(pipe)
-          kill_group(9)
-        end
-      else
-        state.done = true
-        close_pipe(pipe)
-      end
-      complete()
-    end)
-    if not started then
-      table.insert(output_errors, name .. ' capture failed: ' .. tostring(start_error))
+  local function capture(state, name, error_message, data)
+    if state.done then
+      return
+    end
+    if error_message then
+      table.insert(output_errors, name .. ' read failed: ' .. tostring(error_message))
       state.done = true
-      close_pipe(pipe)
       kill_group(9)
       complete()
+      return
     end
+    if data then
+      local remaining = debug_output_max_bytes - state.bytes
+      if #data <= remaining then
+        table.insert(state.chunks, data)
+        state.bytes = state.bytes + #data
+      else
+        if remaining > 0 then
+          table.insert(state.chunks, data:sub(1, remaining))
+          state.bytes = debug_output_max_bytes
+        end
+        table.insert(output_errors, name .. ' exceeded ' .. debug_output_max_bytes .. ' bytes')
+        state.done = true
+        kill_group(9)
+      end
+    else
+      state.done = true
+    end
+    complete()
   end
 
-  local spawn_ok, spawned, spawned_id = pcall(uv.spawn, job.options.command, {
-    args = arguments,
+  local command = { job.options.command }
+  vim.list_extend(command, arguments)
+  local spawn_ok, spawned = pcall(vim.system, command, {
     cwd = cwd or job.project_root,
-    env = debug_environment(environment or job.environment or vim.fn.environ()),
-    stdio = { nil, stdout_pipe, stderr_pipe },
-    detached = true,
-    hide = true,
-  }, function(code, signal)
-    exit_code = code
-    exit_signal = signal
+    env = environment or job.environment or vim.fn.environ(),
+    clear_env = true,
+    detach = true,
+    stdout = function(error_message, data)
+      capture(stdout, 'stdout', error_message, data)
+    end,
+    stderr = function(error_message, data)
+      capture(stderr, 'stderr', error_message, data)
+    end,
+  }, function(result)
+    exit_code = result.code
+    exit_signal = result.signal
     complete()
   end)
   if not spawn_ok or not spawned then
-    close_pipe(stdout_pipe)
-    close_pipe(stderr_pipe)
-    return nil, tostring(spawn_ok and spawned_id or spawned)
+    return nil, label .. ': ' .. tostring(spawned)
   end
   process = spawned
-  process_id = spawned_id
-  read_stream(stdout_pipe, stdout, 'stdout')
-  read_stream(stderr_pipe, stderr, 'stderr')
+  process_id = spawned.pid
   return {
     kill = function(_, signal)
       return uv.kill(-process_id, signal)
