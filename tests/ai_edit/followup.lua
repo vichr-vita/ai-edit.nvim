@@ -71,7 +71,9 @@ local function feed(keys)
 end
 
 local function wait_for(predicate, message)
-  truthy(vim.wait(20000, predicate, 10), message)
+  if not vim.wait(20000, predicate, 10) then
+    fail(message .. '\nnotifications: ' .. vim.inspect(notifications) .. '\nfake log: ' .. vim.inspect(log_entries()))
+  end
 end
 
 local function open_file(name, lines)

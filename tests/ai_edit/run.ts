@@ -117,6 +117,7 @@ try {
     if (code !== 0) {
       failed += 1
       console.error(`${check.name}: failed (${code})`)
+      break
     }
   }
 } finally {
