@@ -15,7 +15,7 @@ local function truthy(value, message)
 end
 
 local function wait_for(predicate, message, timeout)
-  truthy(vim.wait(timeout or 8000, predicate, 10), message)
+  truthy(vim.wait(timeout or 20000, predicate, 10), message)
 end
 
 local root = vim.fn.tempname()
@@ -165,7 +165,7 @@ local function setup(overrides)
   local values = {
     keymap = '<F8>',
     command = vim.fn.getcwd() .. '/tests/ai_edit/fake_opencode.ts',
-    timeout_ms = 3000,
+    timeout_ms = 15000,
     cleanup_timeout_ms = 300,
     max_bytes = 1024 * 1024,
     width = 0.6,

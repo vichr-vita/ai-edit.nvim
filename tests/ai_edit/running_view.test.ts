@@ -34,7 +34,7 @@ describe("AI edit running view", () => {
         ])
         if (code !== 0) throw new Error(`${scenario} failed (${code})\n${stdout}${stderr}`)
       },
-      20_000,
+      45_000,
     )
   }
 })

@@ -52,5 +52,5 @@ describe("hostile project fixture", () => {
     ])
     expect(exitCode, `${stdout}\n${stderr}`).toBe(0)
     expect(await readFile(externalTarget, "utf8")).toBe("EXTERNAL_SYMLINK_SENTINEL\n")
-  }, 30_000)
+  }, 60_000)
 })

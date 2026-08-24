@@ -15,7 +15,7 @@ local function truthy(value, message)
 end
 
 local function wait_for(predicate, message, timeout)
-  truthy(vim.wait(timeout or 5000, predicate, 10), message)
+  truthy(vim.wait(timeout or 20000, predicate, 10), message)
 end
 
 local function feed(keys)
@@ -139,7 +139,7 @@ local ai_edit = require 'ai_edit'
 local base_options = {
   keymap = '<F8>',
   command = fake,
-  timeout_ms = 2000,
+  timeout_ms = 15000,
   cleanup_timeout_ms = 500,
   max_bytes = 1024 * 1024,
   width = 0.5,

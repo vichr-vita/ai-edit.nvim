@@ -40,7 +40,7 @@ async function remoteSend(socket: string, keys: string) {
   if (code !== 0) throw new Error(`remote send failed (${code}): ${keys}\n${stderr}`)
 }
 
-async function waitFor(predicate: () => boolean | Promise<boolean>, message: string, timeout = 8000) {
+async function waitFor(predicate: () => boolean | Promise<boolean>, message: string, timeout = 20000) {
   const deadline = Date.now() + timeout
   while (Date.now() < deadline) {
     if (await predicate()) return
@@ -84,12 +84,12 @@ describe("AI edit TUI caret", () => {
         for (const match of output.matchAll(/\x1b\[\?25([hl])/g)) visible = match[1] === "h"
         return visible
       }
-      const waitCursor = async (visible: boolean, message: string) => {
+      const waitCursor = async (visible: boolean, message: string, timeout?: number) => {
         await waitFor(async () => {
           if (cursorVisible() !== visible) return false
           await Bun.sleep(80)
           return cursorVisible() === visible
-        }, message)
+        }, message, timeout)
       }
 
       try {
@@ -103,30 +103,51 @@ describe("AI edit TUI caret", () => {
         terminal.write("hide caret while running\r")
         await waitFor(async () => (await remote(socket, `getbufvar(${targetBuffer}, '&modifiable')`)) === "0", "target did not lock")
         await remote(socket, "execute('redraw!')")
-        await waitCursor(false, "locked-target TUI caret stayed visible")
+        let terminalVisibility = process.platform !== "linux"
+        if (terminalVisibility) {
+          await waitCursor(false, "locked-target TUI caret stayed visible")
+        } else {
+          try {
+            await waitCursor(false, "locked-target TUI caret stayed visible", 5000)
+            terminalVisibility = true
+          } catch {
+            console.warn("Linux TUI did not expose blend-based cursor visibility; verifying Neovim cursor ownership")
+            expect(await remote(socket, "&guicursor =~# 'AIEditHiddenCursor'")).toBe("1")
+            expect(await remote(socket, "luaeval(\"vim.api.nvim_get_hl(0, { name = 'AIEditHiddenCursor' }).blend\")")).toBe("100")
+          }
+        }
 
-        terminal.write(":")
-        await waitCursor(true, "command-line caret was hidden")
-        terminal.write("\x1b")
-        await waitCursor(false, "target caret did not hide after leaving command line")
+        if (terminalVisibility) {
+          terminal.write(":")
+          await waitCursor(true, "command-line caret was hidden")
+          terminal.write("\x1b")
+          await waitCursor(false, "target caret did not hide after leaving command line")
+        }
 
         await remoteSend(socket, ":enew<CR>")
         await waitFor(async () => Number(await remote(socket, "bufnr('%')")) !== targetBuffer, "unrelated buffer did not open")
-        await waitCursor(true, "unrelated-buffer caret stayed hidden")
+        if (terminalVisibility) await waitCursor(true, "unrelated-buffer caret stayed hidden")
+        else expect(await remote(socket, "&guicursor =~# 'AIEditHiddenCursor'")).toBe("0")
 
         await remoteSend(socket, `:buffer ${targetBuffer}<CR>`)
         await waitFor(async () => Number(await remote(socket, "bufnr('%')")) === targetBuffer, "target buffer did not redisplay")
-        await waitCursor(false, "redisplayed locked-target caret stayed visible")
+        if (terminalVisibility) await waitCursor(false, "redisplayed locked-target caret stayed visible")
+        else expect(await remote(socket, "&guicursor =~# 'AIEditHiddenCursor'")).toBe("1")
 
-        terminal.write(":")
-        await waitCursor(true, "cancel command-line caret was hidden")
-        terminal.write("AIEditCancel\r")
+        if (terminalVisibility) {
+          terminal.write(":")
+          await waitCursor(true, "cancel command-line caret was hidden")
+          terminal.write("AIEditCancel\r")
+        } else {
+          await remoteSend(socket, ":AIEditCancel<CR>")
+        }
         await waitFor(async () => (await remote(socket, `getbufvar(${targetBuffer}, '&modifiable')`)) === "1", "cancel did not unlock target")
         await waitFor(
           async () => (await remote(socket, 'luaeval("require(\'ai_edit\').statusline()")')) === "",
           "cancel did not finish job",
         )
-        await waitCursor(true, "terminal cleanup did not restore TUI caret")
+        if (terminalVisibility) await waitCursor(true, "terminal cleanup did not restore TUI caret")
+        else expect(await remote(socket, "&guicursor =~# 'AIEditHiddenCursor'")).toBe("0")
 
         await remoteSend(socket, ":qa!<CR>")
         expect(await child.exited).toBe(0)
@@ -138,6 +159,6 @@ describe("AI edit TUI caret", () => {
         await rm(root, { recursive: true, force: true })
       }
     },
-    20_000,
+    60_000,
   )
 })

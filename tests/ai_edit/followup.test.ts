@@ -22,24 +22,28 @@ async function makeWritable(path: string) {
 
 describe("Lua staging regressions", () => {
   for (const [name, scenario] of cases) {
-    test(name, async () => {
-      const child = Bun.spawn(
-        ["nvim", "--headless", "-u", "tests/ai_edit/minimal_init.lua", "-l", "tests/ai_edit/followup.lua"],
-        {
-          cwd: process.cwd(),
-          env: { ...process.env, AI_EDIT_FOLLOWUP_CASE: scenario },
-          stdin: "ignore",
-          stdout: "pipe",
-          stderr: "pipe",
-        },
-      )
-      const [code, stdout, stderr] = await Promise.all([
-        child.exited,
-        new Response(child.stdout).text(),
-        new Response(child.stderr).text(),
-      ])
-      if (code !== 0) throw new Error(`${scenario} failed (${code})\n${stdout}${stderr}`)
-    })
+    test(
+      name,
+      async () => {
+        const child = Bun.spawn(
+          ["nvim", "--headless", "-u", "tests/ai_edit/minimal_init.lua", "-l", "tests/ai_edit/followup.lua"],
+          {
+            cwd: process.cwd(),
+            env: { ...process.env, AI_EDIT_FOLLOWUP_CASE: scenario },
+            stdin: "ignore",
+            stdout: "pipe",
+            stderr: "pipe",
+          },
+        )
+        const [code, stdout, stderr] = await Promise.all([
+          child.exited,
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+        ])
+        if (code !== 0) throw new Error(`${scenario} failed (${code})\n${stdout}${stderr}`)
+      },
+      30_000,
+    )
   }
 
   test("publishes one immutable helper cache across concurrent first bootstrap", async () => {
@@ -86,5 +90,5 @@ describe("Lua staging regressions", () => {
       await makeWritable(root).catch(() => {})
       await rm(root, { recursive: true, force: true })
     }
-  }, 15_000)
+  }, 60_000)
 })

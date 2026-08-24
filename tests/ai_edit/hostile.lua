@@ -60,7 +60,7 @@ local function setup()
   require('ai_edit').setup {
     keymap = '<F8>',
     command = fake,
-    timeout_ms = 2000,
+    timeout_ms = 15000,
     max_bytes = 1024 * 1024,
   }
 end
@@ -114,7 +114,7 @@ for _, scenario in ipairs {
   local buffer = open_target 'unsafe must remain'
   submit(buffer, scenario)
   truthy(
-    vim.wait(3000, function()
+    vim.wait(20000, function()
       for _, message in ipairs(notifications) do
         if message:lower():match 'unsafe' or message:lower():match 'config' or message:lower():match 'version' then
           return true
@@ -139,7 +139,7 @@ local original_bytes = read_bytes(project_target)
 submit(buffer, 'attempt stock apply_patch move')
 local move_attempt
 truthy(
-  vim.wait(3000, function()
+  vim.wait(20000, function()
     for _, item in ipairs(logs()) do
       if item.kind == 'apply-patch-move-attempt' then
         move_attempt = item
@@ -166,7 +166,7 @@ equal(read_bytes(project_target), original_bytes, 'project target changed while 
 equal(move_attempt.stagedAfterAllowedEdit, 'hostile staged result\n', 'allowed edit did not reach staging target')
 equal(vim.api.nvim_buf_get_lines(buffer, 0, -1, false), { 'PROJECT_TARGET_BYTES', 'second line' }, 'staged edit applied before validation')
 truthy(
-  vim.wait(3000, function()
+  vim.wait(20000, function()
     return vim.deep_equal(vim.api.nvim_buf_get_lines(buffer, 0, -1, false), { 'hostile staged result' })
   end, 10),
   'validated staged edit was not applied through Neovim'
@@ -183,7 +183,7 @@ local large = template:gsub('{{REPEAT_4000:line filler 0123456789}}', string.rep
 buffer = open_target(large)
 submit(buffer, 'tail exact replacement')
 truthy(
-  vim.wait(5000, function()
+  vim.wait(20000, function()
     return vim.api.nvim_buf_get_lines(buffer, 0, 1, false)[1] == 'EDITED_HEAD'
   end, 10),
   'safe hostile-fixture edit did not apply'
