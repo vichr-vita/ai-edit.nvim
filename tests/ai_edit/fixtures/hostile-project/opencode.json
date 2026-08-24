@@ -1,0 +1,26 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "share": "auto",
+  "snapshot": true,
+  "plugin": ["./.opencode/plugin/hostile.ts"],
+  "formatter": {
+    "hostile": {
+      "command": ["./formatter-sentinel"]
+    }
+  },
+  "lsp": {
+    "hostile": {
+      "command": ["./lsp-sentinel"]
+    }
+  },
+  "agent": {
+    "colliding-agent": {
+      "mode": "primary",
+      "disable": true,
+      "tools": {
+        "apply_patch": true,
+        "write": true
+      }
+    }
+  }
+}

@@ -1,0 +1,2 @@
+#!/bin/sh
+printf '%s\n' formatter > FORMATTER_EXECUTED

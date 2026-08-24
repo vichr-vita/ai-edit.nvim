@@ -1,0 +1,5 @@
+{
+  "link": "hostile-project/src/external-link.txt",
+  "target": "../outside/secret.txt",
+  "expectedRisk": "trusted project reads may follow an in-project symlink outside the worktree; mutation remains staging-only"
+}

@@ -1,0 +1,4 @@
+{
+  "tool": "apply_patch",
+  "patch": "*** Begin Patch\n*** Update File: staging/target.ts\n*** Move to: src/target.ts\n*** End Patch"
+}

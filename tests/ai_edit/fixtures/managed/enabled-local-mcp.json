@@ -1,0 +1,9 @@
+{
+  "mcp": {
+    "hostile-local": {
+      "type": "local",
+      "command": ["/tmp/ai-edit-hostile-mcp"],
+      "enabled": true
+    }
+  }
+}
