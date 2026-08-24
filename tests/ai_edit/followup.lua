@@ -102,7 +102,7 @@ end
 
 require('ai_edit').setup {
   keymap = '<F8>',
-  command = vim.fn.getcwd() .. '/tests/ai_edit/fake_opencode.ts',
+  command = vim.env.AI_EDIT_FAKE_COMMAND or (vim.fn.getcwd() .. '/tests/ai_edit/fake_opencode.ts'),
   timeout_ms = 15000,
   cleanup_timeout_ms = 500,
   max_bytes = 1024 * 1024,

@@ -103,7 +103,8 @@ describe("AI edit TUI caret", () => {
         terminal.write("hide caret while running\r")
         await waitFor(async () => (await remote(socket, `getbufvar(${targetBuffer}, '&modifiable')`)) === "0", "target did not lock")
         await remote(socket, "execute('redraw!')")
-        let terminalVisibility = process.platform !== "linux"
+        const blendOnlyCursor = process.platform === "linux" || (await remote(socket, "has('nvim-0.12')")) === "1"
+        let terminalVisibility = !blendOnlyCursor
         if (terminalVisibility) {
           await waitCursor(false, "locked-target TUI caret stayed visible")
         } else {
@@ -111,7 +112,7 @@ describe("AI edit TUI caret", () => {
             await waitCursor(false, "locked-target TUI caret stayed visible", 5000)
             terminalVisibility = true
           } catch {
-            console.warn("Linux TUI did not expose blend-based cursor visibility; verifying Neovim cursor ownership")
+            console.warn("TUI did not expose blend-based cursor visibility; verifying Neovim cursor ownership")
             expect(await remote(socket, "&guicursor =~# 'AIEditHiddenCursor'")).toBe("1")
             expect(await remote(socket, "luaeval(\"vim.api.nvim_get_hl(0, { name = 'AIEditHiddenCursor' }).blend\")")).toBe("100")
           }
@@ -149,7 +150,7 @@ describe("AI edit TUI caret", () => {
         if (terminalVisibility) await waitCursor(true, "terminal cleanup did not restore TUI caret")
         else expect(await remote(socket, "&guicursor =~# 'AIEditHiddenCursor'")).toBe("0")
 
-        await remoteSend(socket, ":qa!<CR>")
+        terminal.write(":qa!\r")
         expect(await child.exited).toBe(0)
       } finally {
         if (child.exitCode === null) child.kill("SIGKILL")

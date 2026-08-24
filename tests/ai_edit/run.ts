@@ -1,4 +1,6 @@
-import { resolve } from "node:path"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join, resolve } from "node:path"
 
 type Check = {
   name: string
@@ -19,6 +21,24 @@ if (mode === "oauth" && process.env.AI_EDIT_RUN_OAUTH_SMOKE !== "1") {
   process.exit(2)
 }
 
+let fixtureRoot: string | undefined
+let fakeCommand = process.env.AI_EDIT_FAKE_COMMAND
+if ((mode === "fake" || mode === "all") && !fakeCommand) {
+  fixtureRoot = await mkdtemp(join(tmpdir(), "ai-edit-fake-"))
+  fakeCommand = join(fixtureRoot, "opencode")
+  const build = Bun.spawn(["bun", "build", "--compile", "tests/ai_edit/fake_opencode.ts", "--outfile", fakeCommand], {
+    cwd: root,
+    stdin: "ignore",
+    stdout: "inherit",
+    stderr: "inherit",
+  })
+  if ((await build.exited) !== 0) {
+    await rm(fixtureRoot, { recursive: true, force: true })
+    console.error("failed to compile fake OpenCode fixture")
+    process.exit(1)
+  }
+}
+
 function testEnvironment(oauth: boolean) {
   const baselineOpencode = process.env.AI_EDIT_REAL_OPENCODE
   const env = { ...process.env }
@@ -27,6 +47,7 @@ function testEnvironment(oauth: boolean) {
   }
   env.AI_EDIT_RUN_OAUTH_SMOKE = oauth ? "1" : "0"
   if (baselineOpencode) env.AI_EDIT_REAL_OPENCODE = baselineOpencode
+  if (fakeCommand) env.AI_EDIT_FAKE_COMMAND = fakeCommand
   return env
 }
 
@@ -82,20 +103,24 @@ const oauthChecks: Check[] = [
 const checks = mode === "fake" ? fakeChecks : mode === "opencode" ? opencodeChecks : mode === "oauth" ? oauthChecks : [...fakeChecks, ...opencodeChecks]
 
 let failed = 0
-for (const check of checks) {
-  console.log(`\n== ${check.name} ==`)
-  const child = Bun.spawn(check.command, {
-    cwd: root,
-    env: testEnvironment(check.oauth === true),
-    stdin: "ignore",
-    stdout: "inherit",
-    stderr: "inherit",
-  })
-  const code = await child.exited
-  if (code !== 0) {
-    failed += 1
-    console.error(`${check.name}: failed (${code})`)
+try {
+  for (const check of checks) {
+    console.log(`\n== ${check.name} ==`)
+    const child = Bun.spawn(check.command, {
+      cwd: root,
+      env: testEnvironment(check.oauth === true),
+      stdin: "ignore",
+      stdout: "inherit",
+      stderr: "inherit",
+    })
+    const code = await child.exited
+    if (code !== 0) {
+      failed += 1
+      console.error(`${check.name}: failed (${code})`)
+    }
   }
+} finally {
+  if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true })
 }
 
 if (failed > 0) {

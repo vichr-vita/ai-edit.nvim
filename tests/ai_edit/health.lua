@@ -10,7 +10,7 @@ end
 
 local root = vim.fn.tempname()
 vim.fn.mkdir(root, 'p', tonumber('700', 8))
-local fake = vim.fn.getcwd() .. '/tests/ai_edit/fake_opencode.ts'
+local fake = vim.env.AI_EDIT_FAKE_COMMAND or (vim.fn.getcwd() .. '/tests/ai_edit/fake_opencode.ts')
 local log = root .. '/fake.log'
 local user_cache = root .. '/user-cache'
 vim.fn.mkdir(user_cache, 'p')

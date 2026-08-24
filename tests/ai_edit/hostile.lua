@@ -15,7 +15,7 @@ local function equal(actual, expected, message)
 end
 
 local project = assert(vim.env.AI_EDIT_HOSTILE_PROJECT)
-local fake = vim.fn.getcwd() .. '/tests/ai_edit/fake_opencode.ts'
+local fake = vim.env.AI_EDIT_FAKE_COMMAND or (vim.fn.getcwd() .. '/tests/ai_edit/fake_opencode.ts')
 local log_path = assert(vim.env.AI_EDIT_FAKE_LOG)
 local notifications = {}
 vim.notify = function(message)

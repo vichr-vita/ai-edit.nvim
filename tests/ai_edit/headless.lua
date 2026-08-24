@@ -16,7 +16,7 @@ end
 
 local root = vim.fn.tempname()
 vim.fn.mkdir(root, 'p', tonumber('700', 8))
-local fake = vim.fn.getcwd() .. '/tests/ai_edit/fake_opencode.ts'
+local fake = vim.env.AI_EDIT_FAKE_COMMAND or (vim.fn.getcwd() .. '/tests/ai_edit/fake_opencode.ts')
 local log_path = root .. '/fake.log'
 vim.env.AI_EDIT_FAKE_LOG = log_path
 vim.env.AI_EDIT_GLOBAL_MODEL = 'test-provider/inherited-model'
