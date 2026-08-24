@@ -1729,7 +1729,9 @@ local function prepare_helper(job, callback)
       callback(nil, validation_error)
       return
     end
-    local sealed, seal_error = seal_helper_cache(build.root)
+    -- macOS refuses to rename a read-only source directory. Seal the cache
+    -- contents first, then seal the writable publication root after rename.
+    local sealed, seal_error = seal_helper_cache(build.cache)
     if not sealed then
       discard_helper_build(build.root)
       job.helper_build = nil
@@ -1745,6 +1747,12 @@ local function prepare_helper(job, callback)
         callback(nil, 'cannot publish trusted helper cache: ' .. tostring(publish_error or winner_error))
         return
       end
+    end
+    sealed, seal_error = seal_helper_cache(info.root)
+    if not sealed then
+      job.helper_build = nil
+      callback(nil, 'cannot seal published helper cache: ' .. tostring(seal_error))
+      return
     end
     job.helper_build = nil
     callback(info.cache)

@@ -168,10 +168,20 @@ elseif case == 'fsync-error' then
 elseif case == 'bootstrap' then
   local buffer = open_file('bootstrap.lua', { 'concurrent bootstrap' })
   local prompt = open_prompt(buffer)
+  local original_rename = vim.uv.fs_rename
+  local helper_build_mode
+  vim.uv.fs_rename = function(source, destination)
+    if source:match '/%.helper%-build%-' then
+      helper_build_mode = assert(vim.uv.fs_stat(source)).mode
+    end
+    return original_rename(source, destination)
+  end
   submit(prompt, 'bootstrap publication')
   wait_for(function()
     return vim.deep_equal(vim.api.nvim_buf_get_lines(buffer, 0, -1, false), { 'normal result' })
   end, 'bootstrap run did not complete')
+  vim.uv.fs_rename = original_rename
+  truthy(helper_build_mode and bit.band(helper_build_mode, tonumber('200', 8)) ~= 0, 'helper build root was read-only before publication')
 else
   fail('unknown follow-up case: ' .. case)
 end
