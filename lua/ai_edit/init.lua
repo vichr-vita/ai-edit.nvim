@@ -6,6 +6,7 @@ local version_policy = require 'ai_edit.version'
 local helper_cache_version = '5'
 local output_limit = { max_bytes = 32768, max_lines = 10 }
 local activity_limit = { max_bytes = 8192, max_lines = 120, entry_bytes = 2048, entry_lines = 24 }
+local debug_output_max_bytes = 1024 * 1024
 local history_limit = 100
 local hidden_cursor_segment = 'n-v-ve-o-i-r-sm:AIEditHiddenCursor'
 local jobs = {}
@@ -1179,6 +1180,7 @@ local function delete_session(job, session_id)
   ok, process = pcall(vim.system, { job.options.command, 'session', 'delete', session_id }, {
     cwd = job.project_root,
     env = environment,
+    clear_env = true,
     text = true,
   }, function(result)
     vim.schedule(function()
@@ -1508,6 +1510,7 @@ local function launch_run(job)
   local ok, process = pcall(vim.system, { job.options.command, 'run', '--agent', job.agent, '--format', 'json' }, {
     cwd = job.project_root,
     env = job.environment,
+    clear_env = true,
     text = true,
     stdin = job.instruction,
     stdout = stdout_callback,
@@ -1573,51 +1576,131 @@ local function debug_environment(environment)
 end
 
 local function run_debug(job, arguments, label, callback, cwd, environment)
-  job.debug_count = (job.debug_count or 0) + 1
-  local prefix = job.stage_root .. '/debug-' .. job.debug_count
-  local stdout_path = prefix .. '.json'
-  local stderr_path = prefix .. '.stderr'
-  local stdout_fd, stdout_error = uv.fs_open(stdout_path, 'w', tonumber('600', 8))
-  if not stdout_fd then
-    return nil, 'cannot open ' .. label .. ' output: ' .. tostring(stdout_error)
-  end
-  local stderr_fd, stderr_error = uv.fs_open(stderr_path, 'w', tonumber('600', 8))
-  if not stderr_fd then
-    uv.fs_close(stdout_fd)
-    return nil, 'cannot open ' .. label .. ' errors: ' .. tostring(stderr_error)
+  local stdout_pipe = uv.new_pipe(false)
+  local stderr_pipe = uv.new_pipe(false)
+  if not stdout_pipe or not stderr_pipe then
+    if stdout_pipe then
+      stdout_pipe:close()
+    end
+    if stderr_pipe then
+      stderr_pipe:close()
+    end
+    return nil, 'cannot create bounded ' .. label .. ' output pipes'
   end
 
+  local stdout = { chunks = {}, bytes = 0, done = false }
+  local stderr = { chunks = {}, bytes = 0, done = false }
+  local output_errors = {}
   local process
-  local spawn_ok, spawned, spawn_error = pcall(uv.spawn, job.options.command, {
-    args = arguments,
-    cwd = cwd or job.project_root,
-    env = debug_environment(environment or job.environment or vim.fn.environ()),
-    stdio = { nil, stdout_fd, stderr_fd },
-    hide = true,
-  }, function(code, signal)
+  local process_id
+  local exit_code
+  local exit_signal
+  local completed = false
+
+  local function close_pipe(pipe)
+    pcall(pipe.read_stop, pipe)
+    if not pipe:is_closing() then
+      pipe:close()
+    end
+  end
+
+  local function kill_group(signal)
+    if process_id then
+      pcall(uv.kill, -process_id, signal)
+    end
+  end
+
+  local function complete()
+    if completed or exit_code == nil or not stdout.done or not stderr.done then
+      return
+    end
+    completed = true
     if process and not process:is_closing() then
       process:close()
     end
-    uv.fs_close(stdout_fd)
-    uv.fs_close(stderr_fd)
     vim.schedule(function()
-      local stdout, read_stdout_error = read_file(stdout_path)
-      local stderr, read_stderr_error = read_file(stderr_path)
+      local stderr_text = table.concat(stderr.chunks)
+      if #output_errors > 0 then
+        stderr_text = stderr_text .. '\n' .. table.concat(output_errors, '\n')
+      end
       callback {
-        code = code,
-        signal = signal,
-        stdout = stdout or '',
-        stderr = stderr or tostring(read_stdout_error or read_stderr_error or ''),
+        code = #output_errors == 0 and exit_code or 1,
+        signal = exit_signal,
+        stdout = table.concat(stdout.chunks),
+        stderr = stderr_text,
       }
     end)
+  end
+
+  local function read_stream(pipe, state, name)
+    local started, start_error = pcall(pipe.read_start, pipe, function(error_message, data)
+      if state.done then
+        return
+      end
+      if error_message then
+        table.insert(output_errors, name .. ' read failed: ' .. tostring(error_message))
+        state.done = true
+        close_pipe(pipe)
+        kill_group(9)
+        complete()
+        return
+      end
+      if data then
+        local remaining = debug_output_max_bytes - state.bytes
+        if #data <= remaining then
+          table.insert(state.chunks, data)
+          state.bytes = state.bytes + #data
+        else
+          if remaining > 0 then
+            table.insert(state.chunks, data:sub(1, remaining))
+            state.bytes = debug_output_max_bytes
+          end
+          table.insert(output_errors, name .. ' exceeded ' .. debug_output_max_bytes .. ' bytes')
+          state.done = true
+          close_pipe(pipe)
+          kill_group(9)
+        end
+      else
+        state.done = true
+        close_pipe(pipe)
+      end
+      complete()
+    end)
+    if not started then
+      table.insert(output_errors, name .. ' capture failed: ' .. tostring(start_error))
+      state.done = true
+      close_pipe(pipe)
+      kill_group(9)
+      complete()
+    end
+  end
+
+  local spawn_ok, spawned, spawned_id = pcall(uv.spawn, job.options.command, {
+    args = arguments,
+    cwd = cwd or job.project_root,
+    env = debug_environment(environment or job.environment or vim.fn.environ()),
+    stdio = { nil, stdout_pipe, stderr_pipe },
+    detached = true,
+    hide = true,
+  }, function(code, signal)
+    exit_code = code
+    exit_signal = signal
+    complete()
   end)
   if not spawn_ok or not spawned then
-    uv.fs_close(stdout_fd)
-    uv.fs_close(stderr_fd)
-    return nil, tostring(spawn_ok and spawn_error or spawned)
+    close_pipe(stdout_pipe)
+    close_pipe(stderr_pipe)
+    return nil, tostring(spawn_ok and spawned_id or spawned)
   end
   process = spawned
-  return process
+  process_id = spawned_id
+  read_stream(stdout_pipe, stdout, 'stdout')
+  read_stream(stderr_pipe, stderr, 'stderr')
+  return {
+    kill = function(_, signal)
+      return uv.kill(-process_id, signal)
+    end,
+  }
 end
 
 local function prepare_helper(job, callback)

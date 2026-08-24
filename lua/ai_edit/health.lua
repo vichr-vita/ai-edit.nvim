@@ -21,7 +21,7 @@ local function inspect_version(command)
   environment.XDG_STATE_HOME = root .. '/state'
   environment.OPENCODE_TEST_HOME = root .. '/home'
 
-  local started, process = pcall(vim.system, { command, '--version' }, { text = true, env = environment })
+  local started, process = pcall(vim.system, { command, '--version' }, { text = true, env = environment, clear_env = true })
   if not started then
     vim.fn.delete(root, 'rf')
     return nil, tostring(process)

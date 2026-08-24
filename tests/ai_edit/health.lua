@@ -16,6 +16,7 @@ local user_cache = root .. '/user-cache'
 vim.fn.mkdir(user_cache, 'p')
 vim.env.XDG_CACHE_HOME = user_cache
 vim.env.AI_EDIT_FAKE_LOG = log
+vim.env.OPENCODE_CONFIG = root .. '/hostile-opencode.json'
 
 local version_policy = require 'ai_edit.version'
 for _, version in ipairs { '1.18.21', '1.18.22', '1.99.0' } do
@@ -64,6 +65,7 @@ truthy(
   'health executed more than OpenCode --version'
 )
 truthy(entries[2].xdgCacheHome ~= user_cache, 'health exposed user cache to OpenCode')
+truthy(entries[2].opencodeConfig == nil, 'health inherited OpenCode configuration')
 truthy(vim.fn.isdirectory(entries[2].xdgCacheHome) == 0, 'health leaked temporary OpenCode cache')
 truthy(vim.tbl_isempty(vim.fn.readdir(user_cache)), 'health modified user cache')
 
@@ -84,5 +86,6 @@ truthy(value:match 'OpenCode version 2%.0%.0 is unsupported', 'OpenCode 2.0.0 wa
 truthy(value:match '>=1%.18%.21 <2%.0%.0', 'supported version range guidance missing')
 
 vim.health = original_health
+vim.env.OPENCODE_CONFIG = nil
 vim.fn.delete(root, 'rf')
 print 'health ai_edit assertions passed'

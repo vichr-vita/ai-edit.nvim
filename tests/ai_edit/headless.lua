@@ -247,9 +247,21 @@ do
   setup()
 end
 
+-- Debug output is bounded before parsing.
+do
+  clear_notifications()
+  vim.env.AI_EDIT_FAKE_SCENARIO = 'oversized-debug-output'
+  local buffer = open_file('oversized-debug-output.lua', { 'unchanged oversized output' })
+  invoke_normal(buffer, 'reject oversized debug output')
+  wait_terminal 'failed|status|signal|file size|capture'
+  equal(buffer_lines(buffer), { 'unchanged oversized output' }, 'oversized debug output changed buffer')
+end
+
 -- Normal target, exact preflight, argv-safe stdin, dynamic agent, bootstrap, cleanup, undo.
 do
   clear_notifications()
+  vim.env.OPENCODE_DISABLE_DEFAULT_PLUGINS = '1'
+  vim.env.NVIM_AI_EDIT_CONTEXT = '/tmp/stale-ai-edit-context'
   vim.env.AI_EDIT_FAKE_SCENARIO = 'large-debug-config'
   local buffer = open_file('normal.lua', { 'local before = true', 'return before' })
   local before = buffer_lines(buffer)
@@ -279,6 +291,7 @@ do
   truthy(not vim.tbl_contains(run.args, run.instruction), 'instruction leaked into argv')
   equal(run.pure, '1', 'OPENCODE_PURE missing')
   equal(run.disableDefaultPlugins, nil, 'built-in authentication plugins unavailable')
+  equal(run.context, nil, 'runtime inherited stale staging context')
   equal(run.disableProjectConfig, '1', 'project config not disabled')
   equal(run.xdgConfigHome, vim.fs.dirname(run.configDir), 'runtime global config directory was not isolated to helper cache')
   truthy(run.opencodeTestHome and run.opencodeTestHome:find(run.root, 1, true) == 1, 'legacy global extension home was not isolated')
@@ -303,6 +316,17 @@ do
   wait_for(function()
     return count_log 'session-delete' >= 1
   end, 'observed session was not deleted')
+  local cleanup
+  for _, entry in ipairs(log_entries()) do
+    if entry.kind == 'session-delete' then
+      cleanup = entry
+    end
+  end
+  truthy(cleanup, 'session cleanup log missing')
+  equal(cleanup.disableDefaultPlugins, nil, 'session cleanup inherited disabled authentication plugins')
+  equal(cleanup.context, nil, 'session cleanup inherited stale staging context')
+  vim.env.OPENCODE_DISABLE_DEFAULT_PLUGINS = nil
+  vim.env.NVIM_AI_EDIT_CONTEXT = nil
 end
 
 -- Higher compatible CLIs receive an exact matching helper SDK and separate cache.

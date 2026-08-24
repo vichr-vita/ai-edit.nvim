@@ -72,6 +72,9 @@ function config() {
   if (scenario === "large-debug-config") {
     value.command = { oversized: { template: "x".repeat(80 * 1024) } }
   }
+  if (scenario === "oversized-debug-output") {
+    value.command = { oversized: { template: "x".repeat(2 * 1024 * 1024) } }
+  }
   if (scenario === "unsafe-plugin") {
     value.plugin = ["file:///tmp/external-user-plugin.ts"]
   }
@@ -85,6 +88,12 @@ function config() {
 
 function emit(value: Record<string, unknown>) {
   process.stdout.write(`${JSON.stringify(value)}\n`)
+}
+
+async function writeStdout(value: string) {
+  await new Promise<void>((resolve, reject) => {
+    process.stdout.write(value, (error) => (error ? reject(error) : resolve()))
+  })
 }
 
 async function phase(name: string) {
@@ -160,6 +169,7 @@ if (args[0] === "--version") {
     xdgCacheHome: process.env.XDG_CACHE_HOME,
     xdgDataHome: process.env.XDG_DATA_HOME,
     xdgStateHome: process.env.XDG_STATE_HOME,
+    opencodeConfig: process.env.OPENCODE_CONFIG,
   })
   process.stdout.write(scenario === "wrong-version" ? "2.0.0\n" : `${opencodeVersion}\n`)
   process.exit(0)
@@ -177,7 +187,7 @@ if (args[0] === "debug" && args[1] === "config") {
     xdgConfigHome: process.env.XDG_CONFIG_HOME,
     opencodeTestHome: process.env.OPENCODE_TEST_HOME,
   })
-  process.stdout.write(JSON.stringify(config()))
+  await writeStdout(JSON.stringify(config()))
   process.exit(0)
 }
 
@@ -207,7 +217,7 @@ if (args[0] === "debug" && args[1] === "agent") {
     xdgConfigHome: process.env.XDG_CONFIG_HOME,
     opencodeTestHome: process.env.OPENCODE_TEST_HOME,
   })
-  process.stdout.write(
+  await writeStdout(
     JSON.stringify({
       name,
       ...serializedAgent,
@@ -240,6 +250,7 @@ if (args[0] === "session" && args[1] === "delete") {
     disableProjectConfig: process.env.OPENCODE_DISABLE_PROJECT_CONFIG,
     disableAutoshare: process.env.OPENCODE_DISABLE_AUTOSHARE,
     stageRoot: process.env.NVIM_AI_EDIT_STAGE_ROOT,
+    context: process.env.NVIM_AI_EDIT_CONTEXT,
     cleanupConfig,
     toolsIsArray: Array.isArray(cleanupConfig.tools),
   })
