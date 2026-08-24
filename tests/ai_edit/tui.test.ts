@@ -123,7 +123,7 @@ describe("AI edit TUI caret", () => {
         terminal.write("AIEditCancel\r")
         await waitFor(async () => (await remote(socket, `getbufvar(${targetBuffer}, '&modifiable')`)) === "1", "cancel did not unlock target")
         await waitFor(
-          async () => (await remote(socket, 'luaeval("require(\'vichr.ai_edit\').statusline()")')) === "",
+          async () => (await remote(socket, 'luaeval("require(\'ai_edit\').statusline()")')) === "",
           "cancel did not finish job",
         )
         await waitCursor(true, "terminal cleanup did not restore TUI caret")

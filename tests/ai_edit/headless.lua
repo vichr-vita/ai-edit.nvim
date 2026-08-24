@@ -180,7 +180,7 @@ package.loaded.lualine = {
   end,
 }
 
-local ai_edit = require 'vichr.ai_edit'
+local ai_edit = require 'ai_edit'
 local function setup(overrides)
   local options = {
     keymap = '<F8>',
@@ -204,6 +204,13 @@ local function setup(overrides)
 end
 
 setup()
+
+do
+  local ok, message = pcall(ai_edit.setup, 'invalid')
+  truthy(not ok and tostring(message):match 'ai_edit: setup options must be a table', 'setup type error lacks public prefix')
+  ok, message = pcall(ai_edit.setup, { width = 0 / 0 })
+  truthy(not ok and tostring(message):match 'ai_edit: width', 'NaN prompt width was accepted')
+end
 
 -- Lualine status appears immediately, animates, and clears on completion.
 do
@@ -296,6 +303,28 @@ do
   wait_for(function()
     return count_log 'session-delete' >= 1
   end, 'observed session was not deleted')
+end
+
+-- Higher compatible CLIs receive an exact matching helper SDK and separate cache.
+do
+  clear_notifications()
+  vim.env.AI_EDIT_FAKE_SCENARIO = 'success'
+  vim.env.AI_EDIT_FAKE_VERSION = '1.99.0'
+  local buffer = open_file('compatible-version.lua', { 'before compatible version' })
+  invoke_normal(buffer, 'compatible version')
+  wait_for(function()
+    return vim.deep_equal(buffer_lines(buffer), { 'normal result' })
+  end, 'higher compatible OpenCode version did not apply result')
+  local run
+  for _, entry in ipairs(log_entries()) do
+    if entry.kind == 'run' and entry.instruction == 'compatible version' then
+      run = entry
+    end
+  end
+  truthy(run, 'higher compatible OpenCode run missing')
+  local manifest = vim.json.decode(read_file(run.configDir .. '/package.json'))
+  equal(manifest.dependencies['@opencode-ai/plugin'], '1.99.0', 'helper SDK did not match compatible CLI')
+  vim.env.AI_EDIT_FAKE_VERSION = nil
 end
 
 -- A configured model and effort variant override only the generated edit agent.
@@ -746,8 +775,6 @@ do
   local saw_configured_model = false
   for _, entry in ipairs(log_entries()) do
     if entry.kind == 'debug-agent' then
-      total_agents = total_agents + 1
-      names[entry.name] = true
       if entry.agent.model == nil then
         saw_inherited_model = true
       else
@@ -755,6 +782,12 @@ do
         equal(entry.agent.variant, 'high', 'runtime agent pinned unexpected effort variant')
         saw_configured_model = true
       end
+    elseif entry.kind == 'run' then
+      local index = vim.fn.index(entry.args, '--agent')
+      local name = index >= 0 and entry.args[index + 2] or nil
+      truthy(name, 'run omitted generated agent name')
+      total_agents = total_agents + 1
+      names[name] = true
     end
   end
   local unique_agents = 0

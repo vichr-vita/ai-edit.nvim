@@ -27,7 +27,7 @@ type Page = {
 }
 
 const sourcePath = resolve(
-  process.env.AI_EDIT_STAGE_TEXT_SOURCE ?? "lua/vichr/ai_edit/stage_text.ts",
+  process.env.AI_EDIT_STAGE_TEXT_SOURCE ?? "lua/ai_edit/stage_text.ts",
 )
 
 let root = ""

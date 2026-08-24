@@ -105,9 +105,9 @@ local function transcript(target)
   return table.concat(vim.api.nvim_buf_get_lines(buffer, 0, -1, false), '\n')
 end
 
-local function invoke(buffer, instruction)
+local function invoke(buffer, instruction, keymap)
   vim.api.nvim_set_current_buf(buffer)
-  feed '<F8>'
+  feed(keymap or '<F8>')
   wait_for(function()
     return vim.api.nvim_get_current_buf() ~= buffer and vim.bo.buftype == 'nofile'
   end, 'AI edit prompt did not open')
@@ -160,7 +160,7 @@ if case == 'cursor' then
   vim.o.guicursor = 'n:block,i:ver25,c:hor20'
 end
 
-local ai_edit = require 'vichr.ai_edit'
+local ai_edit = require 'ai_edit'
 local function setup(overrides)
   local values = {
     keymap = '<F8>',
@@ -237,6 +237,34 @@ elseif case == 'lock-concurrency' then
   wait_done(ai_edit, 'cancel')
   truthy(vim.bo[second].modifiable, 'second concurrent target remained locked')
   equal(cursor_segment_count(), 0, 'concurrent terminal cleanup leaked cursor override')
+elseif case == 'setup-active' then
+  vim.env.AI_EDIT_FAKE_SCENARIO = 'run-hold'
+  local target = open_file('setup-active.lua', { 'active setup target' })
+  invoke(target, 'preserve active setup')
+  local activity = assert(activity_buffer(target), 'active setup activity did not start')
+  local autocmd_count = #vim.api.nvim_get_autocmds { group = 'ai_edit_running_view' }
+
+  setup { keymap = '<F9>', timeout_ms = 60, status = { text = 'Reconfigured', frames = { 'z' } } }
+  equal(vim.fn.maparg('<F8>', 'n'), '', 'old normal mapping remained after setup')
+  equal(vim.fn.maparg('<F8>', 'x'), '', 'old visual mapping remained after setup')
+  truthy(vim.fn.maparg('<F9>', 'n') ~= '', 'new normal mapping missing after setup')
+  truthy(vim.fn.maparg('<F9>', 'x') ~= '', 'new visual mapping missing after setup')
+  truthy(vim.fn.exists ':AIEditCancel' == 2, 'cancel command missing after repeated setup')
+  equal(#vim.api.nvim_get_autocmds { group = 'ai_edit_running_view' }, autocmd_count, 'repeated setup duplicated autocommands')
+  equal(ai_edit.statusline(), 'z Reconfigured', 'repeated setup invalidated active status frame')
+
+  vim.wait(100)
+  truthy(not vim.bo[target].modifiable, 'new timeout changed active job')
+  equal(activity_buffer(target), activity, 'repeated setup replaced active activity state')
+  ai_edit.cancel(target)
+  wait_done(ai_edit, 'cancel')
+  truthy(vim.bo[target].modifiable, 'active target remained locked after cancellation')
+
+  clear_notifications()
+  vim.env.AI_EDIT_FAKE_SCENARIO = 'timeout'
+  target = open_file('setup-subsequent.lua', { 'subsequent setup target' })
+  invoke(target, 'use subsequent setup', '<F9>')
+  wait_done(ai_edit, 'timeout|timed out')
 elseif case == 'stale-targets' then
   local function start(name)
     clear_notifications()

@@ -57,7 +57,7 @@ local function read_bytes(path)
 end
 
 local function setup()
-  require('vichr.ai_edit').setup {
+  require('ai_edit').setup {
     keymap = '<F8>',
     command = fake,
     timeout_ms = 2000,
@@ -96,6 +96,7 @@ for _, scenario in ipairs {
   'unsafe-sharing',
   'unsafe-mcp',
   'unsafe-plugin',
+  'unsafe-provider',
   'disabled-agent',
   'wrong-version',
 } do

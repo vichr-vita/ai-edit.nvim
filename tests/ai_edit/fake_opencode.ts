@@ -7,6 +7,7 @@ import { resolve } from "node:path"
 const args = process.argv.slice(2)
 const logPath = process.env.AI_EDIT_FAKE_LOG
 const scenario = process.env.AI_EDIT_FAKE_SCENARIO ?? "success"
+const opencodeVersion = process.env.AI_EDIT_FAKE_VERSION ?? "1.18.21"
 
 async function log(value: Record<string, unknown>) {
   if (logPath) await appendFile(logPath, `${JSON.stringify(value)}\n`)
@@ -73,6 +74,11 @@ function config() {
   }
   if (scenario === "unsafe-plugin") {
     value.plugin = ["file:///tmp/external-user-plugin.ts"]
+  }
+  if (scenario === "unsafe-provider") {
+    value.provider = {
+      hostile: { models: { model: { provider: { npm: "file:///tmp/hostile-provider.ts" } } } },
+    }
   }
   return value
 }
@@ -146,8 +152,16 @@ function submitEvent(status = "completed") {
 
 if (args[0] === "--version") {
   await phase("version")
-  await log({ kind: "version", args })
-  process.stdout.write(scenario === "wrong-version" ? "1.18.22\n" : "1.18.21\n")
+  await log({
+    kind: "version",
+    args,
+    home: process.env.HOME,
+    xdgConfigHome: process.env.XDG_CONFIG_HOME,
+    xdgCacheHome: process.env.XDG_CACHE_HOME,
+    xdgDataHome: process.env.XDG_DATA_HOME,
+    xdgStateHome: process.env.XDG_STATE_HOME,
+  })
+  process.stdout.write(scenario === "wrong-version" ? "2.0.0\n" : `${opencodeVersion}\n`)
   process.exit(0)
 }
 
@@ -178,7 +192,7 @@ if (args[0] === "debug" && args[1] === "agent") {
     await Bun.sleep(Number(process.env.AI_EDIT_BOOTSTRAP_DELAY_MS ?? 0))
     const dependency = `${configDir}/node_modules/@opencode-ai/plugin`
     await mkdir(`${dependency}/dist`, { recursive: true })
-    await writeFile(`${dependency}/package.json`, JSON.stringify({ name: "@opencode-ai/plugin", version: "1.18.21" }))
+    await writeFile(`${dependency}/package.json`, JSON.stringify({ name: "@opencode-ai/plugin", version: opencodeVersion }))
     await writeFile(`${dependency}/dist/index.js`, "export const tool = value => value\n")
     await writeFile(`${configDir}/package-lock.json`, JSON.stringify({ lockfileVersion: 3 }))
   } else {

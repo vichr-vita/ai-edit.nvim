@@ -135,7 +135,7 @@ local function close_prompt()
   end, 'prompt floats did not close')
 end
 
-local ai_edit = require 'vichr.ai_edit'
+local ai_edit = require 'ai_edit'
 local base_options = {
   keymap = '<F8>',
   command = fake,

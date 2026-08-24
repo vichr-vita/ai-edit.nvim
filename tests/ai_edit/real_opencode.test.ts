@@ -4,7 +4,7 @@ import { chmod, cp, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } fr
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
-const opencode = Bun.which("opencode")
+const opencode = process.env.AI_EDIT_REAL_OPENCODE || Bun.which("opencode")
 let sandbox = ""
 let project = ""
 let stageRoot = ""
@@ -19,6 +19,12 @@ let globalHome = ""
 let isolatedCacheHome = ""
 let emptyManagedConfigDir = ""
 let sessionsBefore = new Set<string>()
+let oauthEnv: Record<string, string | undefined> = {}
+let oauthSessionsBefore = new Set<string>()
+
+function parseSessions(output: string) {
+  return output.trim() === "" ? [] : (JSON.parse(output) as { id: string }[])
+}
 
 async function setTreeMode(path: string, readonly: boolean) {
   const info = await lstat(path)
@@ -86,14 +92,18 @@ beforeAll(async () => {
   const isolatedConfigHome = join(sandbox, "isolated-runtime")
   const configDir = join(isolatedConfigHome, "opencode")
   isolatedCacheHome = join(sandbox, "empty-xdg-cache")
+  const isolatedDataHome = join(sandbox, "empty-xdg-data")
+  const isolatedStateHome = join(sandbox, "empty-xdg-state")
   emptyManagedConfigDir = join(sandbox, "empty-managed-config")
   const isolatedHome = join(sandbox, "isolated-home")
   await mkdir(join(configDir, "tool"), { recursive: true, mode: 0o700 })
   await mkdir(isolatedCacheHome)
+  await mkdir(isolatedDataHome)
+  await mkdir(isolatedStateHome)
   await mkdir(emptyManagedConfigDir)
   await mkdir(isolatedHome)
   expect(await readdir(isolatedCacheHome)).toEqual([])
-  const helperSource = await readFile(resolve("lua/vichr/ai_edit/stage_text.ts"))
+  const helperSource = await readFile(resolve("lua/ai_edit/stage_text.ts"))
   await writeFile(join(configDir, "tool/stage_text.ts"), helperSource)
   await writeFile(join(configDir, "package.json"), JSON.stringify({ dependencies: { "@opencode-ai/plugin": "1.18.21" } }))
 
@@ -158,8 +168,11 @@ beforeAll(async () => {
   const { OPENCODE_DISABLE_DEFAULT_PLUGINS: _disabledDefaults, ...trustedBundleEnvironment } = process.env
   env = {
     ...trustedBundleEnvironment,
+    HOME: isolatedHome,
     XDG_CONFIG_HOME: isolatedConfigHome,
     XDG_CACHE_HOME: isolatedCacheHome,
+    XDG_DATA_HOME: isolatedDataHome,
+    XDG_STATE_HOME: isolatedStateHome,
     OPENCODE_TEST_HOME: isolatedHome,
     OPENCODE_TEST_MANAGED_CONFIG_DIR: emptyManagedConfigDir,
     OPENCODE_CONFIG_DIR: configDir,
@@ -180,8 +193,11 @@ beforeAll(async () => {
 
   discoveryEnv = {
     ...trustedBundleEnvironment,
+    HOME: globalHome,
     XDG_CONFIG_HOME: globalConfigHome,
     XDG_CACHE_HOME: isolatedCacheHome,
+    XDG_DATA_HOME: isolatedDataHome,
+    XDG_STATE_HOME: isolatedStateHome,
     OPENCODE_TEST_HOME: globalHome,
     OPENCODE_TEST_MANAGED_CONFIG_DIR: emptyManagedConfigDir,
     OPENCODE_CONFIG_CONTENT: JSON.stringify({ ...config, model: undefined, provider: undefined }),
@@ -192,7 +208,44 @@ beforeAll(async () => {
   }
   const sessions = await run(["session", "list", "--format", "json"])
   expect(sessions.code, sessions.stderr).toBe(0)
-  sessionsBefore = new Set(JSON.parse(sessions.stdout).map((session: { id: string }) => session.id))
+  sessionsBefore = new Set(parseSessions(sessions.stdout).map((session) => session.id))
+
+  if (process.env.AI_EDIT_RUN_OAUTH_SMOKE === "1") {
+    const userHome = process.env.HOME
+    if (!userHome) throw new Error("OAuth smoke requires HOME")
+    const userConfigHome = process.env.XDG_CONFIG_HOME || join(userHome, ".config")
+    const userDataHome = process.env.XDG_DATA_HOME || join(userHome, ".local/share")
+    const authSource = join(userDataHome, "opencode/auth.json")
+    if (!(await Bun.file(authSource).exists())) throw new Error(`OAuth smoke credentials not found: ${authSource}`)
+    const oauthHome = join(sandbox, "oauth-home")
+    const oauthCacheHome = join(sandbox, "oauth-cache")
+    const oauthDataHome = join(sandbox, "oauth-data")
+    const oauthStateHome = join(sandbox, "oauth-state")
+    await mkdir(oauthHome)
+    await mkdir(oauthCacheHome)
+    await mkdir(join(oauthDataHome, "opencode"), { recursive: true, mode: 0o700 })
+    await mkdir(oauthStateHome)
+    await cp(authSource, join(oauthDataHome, "opencode/auth.json"))
+    oauthEnv = {
+      ...trustedBundleEnvironment,
+      HOME: oauthHome,
+      XDG_CONFIG_HOME: userConfigHome,
+      XDG_CACHE_HOME: oauthCacheHome,
+      XDG_DATA_HOME: oauthDataHome,
+      XDG_STATE_HOME: oauthStateHome,
+      OPENCODE_TEST_HOME: oauthHome,
+      OPENCODE_TEST_MANAGED_CONFIG_DIR: emptyManagedConfigDir,
+      OPENCODE_CONFIG: undefined,
+      OPENCODE_CONFIG_DIR: undefined,
+      OPENCODE_CONFIG_CONTENT: undefined,
+      OPENCODE_PURE: undefined,
+      OPENCODE_DISABLE_PROJECT_CONFIG: undefined,
+      OPENCODE_DISABLE_AUTOSHARE: undefined,
+    }
+    const oauthSessions = await run(["session", "list", "--format", "json"], project, oauthEnv)
+    expect(oauthSessions.code, oauthSessions.stderr).toBe(0)
+    oauthSessionsBefore = new Set(parseSessions(oauthSessions.stdout).map((session) => session.id))
+  }
   await setTreeMode(configDir, true)
 }, 90_000)
 
@@ -200,8 +253,16 @@ afterAll(async () => {
   if (project && opencode) {
     const sessions = await run(["session", "list", "--format", "json"])
     if (sessions.code === 0) {
-      for (const session of JSON.parse(sessions.stdout) as { id: string }[]) {
+      for (const session of parseSessions(sessions.stdout)) {
         if (!sessionsBefore.has(session.id)) await run(["session", "delete", session.id])
+      }
+    }
+    if (process.env.AI_EDIT_RUN_OAUTH_SMOKE === "1") {
+      const oauthSessions = await run(["session", "list", "--format", "json"], project, oauthEnv)
+      if (oauthSessions.code === 0) {
+        for (const session of parseSessions(oauthSessions.stdout)) {
+          if (!oauthSessionsBefore.has(session.id)) await run(["session", "delete", session.id], project, oauthEnv)
+        }
       }
     }
   }
@@ -230,7 +291,7 @@ describe("installed OpenCode hostile boundary", () => {
       {
         cwd: process.cwd(),
         env: {
-          ...process.env,
+          ...env,
           XDG_CONFIG_HOME: globalConfigHome,
           XDG_CACHE_HOME: isolatedCacheHome,
           OPENCODE_TEST_HOME: globalHome,
@@ -259,7 +320,7 @@ describe("installed OpenCode hostile boundary", () => {
 
     const after = await run(["session", "list", "--format", "json"])
     expect(after.code, after.stderr).toBe(0)
-    expect(JSON.parse(after.stdout)).toEqual(JSON.parse(before.stdout))
+    expect(parseSessions(after.stdout)).toEqual(parseSessions(before.stdout))
     expect(await readFile(projectTarget, "utf8")).toBe(projectBytes)
   }, 30_000)
 
@@ -358,14 +419,14 @@ describe("installed OpenCode hostile boundary", () => {
   test.skipIf(process.env.AI_EDIT_RUN_OAUTH_SMOKE !== "1")(
     "uses bundled OpenAI OAuth while keeping hostile project extensions disabled",
     async () => {
-      const sessionsBeforeSmoke = await run(["session", "list", "--format", "json"])
+      const sessionsBeforeSmoke = await run(["session", "list", "--format", "json"], project, oauthEnv)
       expect(sessionsBeforeSmoke.code, sessionsBeforeSmoke.stderr).toBe(0)
       const smoke = Bun.spawn(
         ["nvim", "--headless", "-u", "tests/ai_edit/minimal_init.lua", "-l", "tests/ai_edit/real_oauth_smoke.lua"],
         {
           cwd: process.cwd(),
           env: {
-            ...process.env,
+            ...oauthEnv,
             AI_EDIT_REAL_PROJECT: project,
             AI_EDIT_REAL_OPENCODE: opencode!,
           },
@@ -386,9 +447,9 @@ describe("installed OpenCode hostile boundary", () => {
       expect(await Bun.file(join(project, "PLUGIN_EXECUTED")).exists()).toBe(false)
       expect(await Bun.file(globalToolSentinel).exists()).toBe(false)
 
-      const sessionsAfterSmoke = await run(["session", "list", "--format", "json"])
+      const sessionsAfterSmoke = await run(["session", "list", "--format", "json"], project, oauthEnv)
       expect(sessionsAfterSmoke.code, sessionsAfterSmoke.stderr).toBe(0)
-      expect(JSON.parse(sessionsAfterSmoke.stdout)).toEqual(JSON.parse(sessionsBeforeSmoke.stdout))
+      expect(parseSessions(sessionsAfterSmoke.stdout)).toEqual(parseSessions(sessionsBeforeSmoke.stdout))
     },
     210_000,
   )

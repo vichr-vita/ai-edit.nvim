@@ -15,7 +15,7 @@ vim.cmd('silent edit ' .. vim.fn.fnameescape(target))
 local buffer = vim.api.nvim_get_current_buf()
 local before = vim.api.nvim_buf_get_lines(buffer, 0, -1, false)
 
-require('vichr.ai_edit').setup {
+require('ai_edit').setup {
   keymap = '<F8>',
   command = command,
   timeout_ms = 15000,

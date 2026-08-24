@@ -1,7 +1,8 @@
 local M = {}
 
 local uv = vim.uv or vim.loop
-local opencode_version = '1.18.21'
+local health_state = require 'ai_edit.health_state'
+local version_policy = require 'ai_edit.version'
 local helper_cache_version = '5'
 local output_limit = { max_bytes = 32768, max_lines = 10 }
 local activity_limit = { max_bytes = 8192, max_lines = 120, entry_bytes = 2048, entry_lines = 24 }
@@ -11,6 +12,7 @@ local jobs = {}
 local instruction_history = {}
 local status_timer
 local status_frame = 1
+local mapped_keymap
 local cursor_state = {
   base = nil,
   scheduled = false,
@@ -766,8 +768,8 @@ local function create_staging(job)
   return true
 end
 
-local function helper_source()
-  local source_paths = vim.api.nvim_get_runtime_file('lua/vichr/ai_edit/stage_text.ts', false)
+local function helper_source(command, opencode_version)
+  local source_paths = vim.api.nvim_get_runtime_file('lua/ai_edit/stage_text.ts', false)
   local source_path = source_paths[1]
   if not source_path then
     return nil, 'trusted stage_text helper source is missing'
@@ -777,9 +779,9 @@ local function helper_source()
     return nil, 'cannot read trusted stage_text helper: ' .. tostring(read_error)
   end
   local parent = vim.fn.stdpath 'cache' .. '/nvim-ai-edit'
-  local command = vim.fn.exepath(options.command)
-  if command == '' then
-    command = options.command
+  local resolved_command = vim.fn.exepath(command)
+  if resolved_command == '' then
+    resolved_command = command
   end
   local root = parent
     .. '/helper-'
@@ -789,11 +791,11 @@ local function helper_source()
     .. '-'
     .. vim.fn.sha256(source):sub(1, 16)
     .. '-'
-    .. vim.fn.sha256(command):sub(1, 12)
-  return { source = source, parent = parent, root = root, cache = root .. '/opencode' }
+    .. vim.fn.sha256(resolved_command):sub(1, 12)
+  return { source = source, version = opencode_version, parent = parent, root = root, cache = root .. '/opencode' }
 end
 
-local function verify_helper_cache(cache, source)
+local function verify_helper_cache(cache, source, opencode_version)
   local status = uv.fs_lstat(cache)
   if not status or status.type ~= 'directory' then
     return nil, 'published helper cache is missing'
@@ -909,7 +911,7 @@ local function materialize_helper_build(info)
     vim.fn.delete(root, 'rf')
     return nil, 'cannot materialize trusted helper: ' .. tostring(error_message)
   end
-  local manifest = vim.json.encode { dependencies = { ['@opencode-ai/plugin'] = opencode_version } }
+  local manifest = vim.json.encode { dependencies = { ['@opencode-ai/plugin'] = info.version } }
   ok, error_message = write_file(cache .. '/package.json', manifest)
   if not ok then
     vim.fn.delete(root, 'rf')
@@ -1026,6 +1028,21 @@ end
 
 local expected_enabled_tools = { 'glob', 'grep', 'read', 'stage_text' }
 
+local function contains_provider_package(value)
+  if type(value) ~= 'table' then
+    return false
+  end
+  if value.npm ~= nil then
+    return true
+  end
+  for _, child in pairs(value) do
+    if contains_provider_package(child) then
+      return true
+    end
+  end
+  return false
+end
+
 local function validate_resolved_config(config)
   if type(config) ~= 'table' then
     return nil, 'resolved config is not an object'
@@ -1053,6 +1070,14 @@ local function validate_resolved_config(config)
   end
   if not vim.deep_equal(enabled_tools(config.tools), expected_enabled_tools) then
     return nil, 'resolved enabled tools differ from read, glob, grep, and stage_text'
+  end
+  if config.provider ~= nil and type(config.provider) ~= 'table' then
+    return nil, 'provider configuration is not an object'
+  end
+  for name, provider in pairs(config.provider or {}) do
+    if contains_provider_package(provider) then
+      return nil, 'provider ' .. name .. ' loads a custom npm package'
+    end
   end
   for name, allowed in pairs(safe_tools) do
     if allowed == false and config.tools[name] == true then
@@ -1597,12 +1622,12 @@ end
 
 local function prepare_helper(job, callback)
   activity_phase(job, 'Preparing trusted helper')
-  local info, info_error = helper_source()
+  local info, info_error = helper_source(job.options.command, job.opencode_version)
   if not info then
     callback(nil, info_error)
     return
   end
-  local verified = verify_helper_cache(info.cache, info.source)
+  local verified = verify_helper_cache(info.cache, info.source, info.version)
   if verified then
     local sealed, seal_error = seal_helper_cache(info.root)
     callback(sealed and info.cache or nil, seal_error)
@@ -1629,7 +1654,7 @@ local function prepare_helper(job, callback)
       callback(nil, 'helper dependency bootstrap failed: ' .. tostring(result.stderr or ''))
       return
     end
-    local valid, validation_error = verify_helper_cache(build.cache, info.source)
+    local valid, validation_error = verify_helper_cache(build.cache, info.source, info.version)
     if not valid then
       discard_helper_build(build.root)
       job.helper_build = nil
@@ -1646,7 +1671,7 @@ local function prepare_helper(job, callback)
     local published, publish_error = uv.fs_rename(build.root, info.root)
     if not published then
       discard_helper_build(build.root)
-      local winner_valid, winner_error = verify_helper_cache(info.cache, info.source)
+      local winner_valid, winner_error = verify_helper_cache(info.cache, info.source, info.version)
       if not winner_valid then
         job.helper_build = nil
         callback(nil, 'cannot publish trusted helper cache: ' .. tostring(publish_error or winner_error))
@@ -1751,10 +1776,11 @@ local function preflight_version(job)
       return
     end
     local version = (result.stdout or ''):match '^%s*(.-)%s*$'
-    if version ~= opencode_version then
-      finish(job, 'error', 'unsupported OpenCode version: expected ' .. opencode_version .. ', resolved ' .. tostring(version))
+    if not version_policy.supported(version) then
+      finish(job, 'error', 'unsupported OpenCode version: expected ' .. version_policy.range .. ', resolved ' .. tostring(version))
       return
     end
+    job.opencode_version = version
     preflight_global_config(job)
   end)
   if not process then
@@ -2202,58 +2228,58 @@ local function validate_options(overrides)
   }
   for key in pairs(overrides) do
     if not allowed[key] then
-      error('vichr.ai_edit: unknown option ' .. key)
+      error('ai_edit: unknown option ' .. key)
     end
   end
   if type(overrides.keymap) ~= 'string' or overrides.keymap == '' then
-    error 'vichr.ai_edit: keymap must be non-empty text'
+    error 'ai_edit: keymap must be non-empty text'
   end
   if type(overrides.command) ~= 'string' or overrides.command == '' then
-    error 'vichr.ai_edit: command must be non-empty text'
+    error 'ai_edit: command must be non-empty text'
   end
   if overrides.model ~= false and (type(overrides.model) ~= 'string' or not overrides.model:match '^[^/]+/.+$') then
-    error 'vichr.ai_edit: model must be false or provider/model text'
+    error 'ai_edit: model must be false or provider/model text'
   end
   if overrides.variant ~= false and (type(overrides.variant) ~= 'string' or overrides.variant == '') then
-    error 'vichr.ai_edit: variant must be false or non-empty text'
+    error 'ai_edit: variant must be false or non-empty text'
   end
   if overrides.variant and not overrides.model then
-    error 'vichr.ai_edit: variant requires model'
+    error 'ai_edit: variant requires model'
   end
   for _, key in ipairs { 'timeout_ms', 'cleanup_timeout_ms', 'max_bytes' } do
     if type(overrides[key]) ~= 'number' or overrides[key] <= 0 or overrides[key] % 1 ~= 0 then
-      error('vichr.ai_edit: ' .. key .. ' must be a positive integer')
+      error('ai_edit: ' .. key .. ' must be a positive integer')
     end
   end
   for _, key in ipairs { 'width', 'height' } do
-    if type(overrides[key]) ~= 'number' or overrides[key] <= 0 or overrides[key] > 1 then
-      error('vichr.ai_edit: ' .. key .. ' must be greater than 0 and at most 1')
+    if type(overrides[key]) ~= 'number' or overrides[key] ~= overrides[key] or overrides[key] <= 0 or overrides[key] > 1 then
+      error('ai_edit: ' .. key .. ' must be greater than 0 and at most 1')
     end
   end
   if type(overrides.status) ~= 'table' then
-    error 'vichr.ai_edit: status must be a table'
+    error 'ai_edit: status must be a table'
   end
   local status_allowed = { text = true, color = true, interval_ms = true, frames = true }
   for key in pairs(overrides.status) do
     if not status_allowed[key] then
-      error('vichr.ai_edit: unknown status option ' .. key)
+      error('ai_edit: unknown status option ' .. key)
     end
   end
   if type(overrides.status.text) ~= 'string' or overrides.status.text == '' then
-    error 'vichr.ai_edit: status.text must be non-empty text'
+    error 'ai_edit: status.text must be non-empty text'
   end
   if type(overrides.status.color) ~= 'string' or not overrides.status.color:match '^#%x%x%x%x%x%x$' then
-    error 'vichr.ai_edit: status.color must be a six-digit hex color'
+    error 'ai_edit: status.color must be a six-digit hex color'
   end
   if type(overrides.status.interval_ms) ~= 'number' or overrides.status.interval_ms <= 0 or overrides.status.interval_ms % 1 ~= 0 then
-    error 'vichr.ai_edit: status.interval_ms must be a positive integer'
+    error 'ai_edit: status.interval_ms must be a positive integer'
   end
   if not vim.islist(overrides.status.frames) or #overrides.status.frames == 0 then
-    error 'vichr.ai_edit: status.frames must be a non-empty list'
+    error 'ai_edit: status.frames must be a non-empty list'
   end
   for _, frame in ipairs(overrides.status.frames) do
     if type(frame) ~= 'string' or frame == '' then
-      error 'vichr.ai_edit: every status frame must be non-empty text'
+      error 'ai_edit: every status frame must be non-empty text'
     end
   end
 end
@@ -2284,7 +2310,7 @@ local function setup_running_view()
   cursor_state.base = strip_hidden_cursor(vim.o.guicursor)
   set_guicursor(cursor_state.base)
 
-  local group = vim.api.nvim_create_augroup('vichr_ai_edit_running_view', { clear = true })
+  local group = vim.api.nvim_create_augroup('ai_edit_running_view', { clear = true })
   vim.api.nvim_create_autocmd('OptionSet', {
     group = group,
     pattern = 'guicursor',
@@ -2314,6 +2340,9 @@ local function setup_running_view()
 end
 
 function M.setup(overrides)
+  if overrides ~= nil and type(overrides) ~= 'table' then
+    error 'ai_edit: setup options must be a table'
+  end
   local configured = copy_table(options)
   for key, value in pairs(overrides or {}) do
     if key == 'status' and type(value) == 'table' then
@@ -2323,7 +2352,20 @@ function M.setup(overrides)
     end
   end
   validate_options(configured)
+  if mapped_keymap and mapped_keymap ~= configured.keymap then
+    for _, mapping in ipairs {
+      { mode = 'n', desc = 'AI edit buffer' },
+      { mode = 'x', desc = 'AI edit selection' },
+    } do
+      local current = vim.fn.maparg(mapped_keymap, mapping.mode, false, true)
+      if current.desc == mapping.desc then
+        pcall(vim.keymap.del, mapping.mode, mapped_keymap)
+      end
+    end
+  end
   options = configured
+  status_frame = 1
+  health_state.command = options.command
   setup_running_view()
 
   vim.keymap.set('n', options.keymap, function()
@@ -2332,6 +2374,7 @@ function M.setup(overrides)
   vim.keymap.set('x', options.keymap, function()
     invoke 'visual'
   end, { desc = 'AI edit selection' })
+  mapped_keymap = options.keymap
   vim.api.nvim_create_user_command('AIEditCancel', function()
     M.cancel()
   end, { desc = 'Cancel AI edit for current buffer', force = true })

@@ -85,7 +85,7 @@ vim.cmd('silent edit ' .. vim.fn.fnameescape(target))
 local buffer = vim.api.nvim_get_current_buf()
 local before = vim.api.nvim_buf_get_lines(buffer, 0, -1, false)
 local before_disk = read_file(target)
-local ai_edit = require 'vichr.ai_edit'
+local ai_edit = require 'ai_edit'
 ai_edit.setup {
   keymap = '<F8>',
   command = command,

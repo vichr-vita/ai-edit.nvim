@@ -3,6 +3,7 @@ import { describe, test } from "bun:test"
 const cases = [
   ["locks target while unrelated buffers remain editable", "lock-basic"],
   ["keeps concurrent target locks and views independent", "lock-concurrency"],
+  ["preserves active jobs across repeated setup", "setup-active"],
   ["rejects forced, renamed, unloaded, and deleted targets", "stale-targets"],
   ["suppresses hostile modifiable OptionSet handlers", "lock-optionset"],
   ["owns and restores guarded guicursor state", "cursor"],

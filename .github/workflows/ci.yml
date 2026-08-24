@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Neovim ${{ matrix.neovim }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            neovim: v0.11.4
+          - os: ubuntu-24.04
+            neovim: stable
+          - os: macos-15
+            neovim: stable
+    env:
+      AI_EDIT_RUN_OAUTH_SMOKE: "0"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.9
+
+      - name: Install Neovim
+        uses: rhysd/action-setup-vim@v1
+        with:
+          version: ${{ matrix.neovim }}
+          neovim: true
+
+      - name: Install StyLua
+        uses: taiki-e/install-action@v2
+        with:
+          tool: stylua@2.0.2
+
+      - name: Install baseline OpenCode
+        run: bun add --global opencode-ai@1.18.21
+
+      - name: Verify tool versions
+        run: |
+          bun --version
+          nvim --version
+          stylua --version
+          test "$(opencode --version)" = "1.18.21"
+
+      - name: Run required checks
+        run: bun tests/ai_edit/run.ts all

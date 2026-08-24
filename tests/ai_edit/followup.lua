@@ -100,7 +100,7 @@ local function submit(prompt, instruction)
   feed '<CR>'
 end
 
-require('vichr.ai_edit').setup {
+require('ai_edit').setup {
   keymap = '<F8>',
   command = vim.fn.getcwd() .. '/tests/ai_edit/fake_opencode.ts',
   timeout_ms = 2000,

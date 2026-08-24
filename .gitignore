@@ -1,0 +1,5 @@
+.DS_Store
+.env
+.nvimlog
+*.log
+doc/tags

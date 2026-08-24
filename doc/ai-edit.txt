@@ -1,0 +1,208 @@
+*ai-edit.txt*                    Focused asynchronous AI edits through OpenCode
+
+==============================================================================
+CONTENTS                                                        *ai-edit*
+
+1. Setup                                                   |ai-edit-setup|
+2. Options                                               |ai-edit-options|
+3. Mappings and prompt                                  |ai-edit-mappings|
+4. Commands                                             |ai-edit-commands|
+5. Statusline                                         |ai-edit-statusline|
+6. Health                                                 |ai-edit-health|
+7. Security                                             |ai-edit-security|
+8. Data lifecycle                                           |ai-edit-data|
+9. Troubleshooting                              |ai-edit-troubleshooting|
+
+AI edit targets a whole in-memory buffer or exact characterwise/linewise visual
+selection. Work runs asynchronously. Successful text remains unsaved and can be
+reverted with one `u`. Blockwise selections are unsupported.
+
+==============================================================================
+1. SETUP                                                   *ai-edit-setup*
+
+Requirements: Neovim 0.11+, macOS or Linux, and stable OpenCode
+`>=1.18.21 <2.0.0` with provider, model, and credentials configured. First use
+for each OpenCode version needs network access for the exact matching
+`@opencode-ai/plugin`. Use trusted worktrees only.
+
+Lazy setup: >lua
+  {
+    'vichr-vita/ai-edit.nvim',
+    main = 'ai_edit',
+    opts = {},
+  }
+<
+Other package managers must add the repository root to 'runtimepath', then: >lua
+  require('ai_edit').setup({})
+<
+Setup is explicit. No mapping is installed before setup runs. Repeated setup
+removes prior package mappings when the key changes and replaces package command
+and autocommands. Active jobs keep captured options and process state.
+
+==============================================================================
+2. OPTIONS                                               *ai-edit-options*
+
+Full defaults: >lua
+  require('ai_edit').setup {
+    keymap = '<leader>ai',
+    command = 'opencode',
+    model = false,
+    variant = false,
+    timeout_ms = 300000,
+    cleanup_timeout_ms = 2000,
+    max_bytes = 1048576,
+    width = 0.5,
+    height = 0.2,
+    status = {
+      text = 'AI is Working...',
+      color = '#d946ef',
+      interval_ms = 80,
+      frames = { '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏' },
+    },
+  }
+<
+                                                       *ai-edit-option-keymap*
+keymap string, default `<leader>ai`. Non-empty global normal/visual mapping.
+
+                                                      *ai-edit-option-command*
+command string, default `opencode`. Executable name/path without shell arguments.
+
+                                                        *ai-edit-option-model*
+model string or false, default false. `provider/model`; false inherits resolved
+OpenCode configuration.
+
+                                                      *ai-edit-option-variant*
+variant string or false, default false. Non-empty and requires explicit model.
+
+                                                   *ai-edit-option-timeout_ms*
+timeout_ms positive integer, default 300000. Bounds preflight, bootstrap, run.
+
+                                           *ai-edit-option-cleanup_timeout_ms*
+cleanup_timeout_ms positive integer, default 2000. Bounds each session deletion.
+
+                                                    *ai-edit-option-max_bytes*
+max_bytes positive integer, default 1048576. Full buffer must fit for all edits.
+
+                                                        *ai-edit-option-width*
+width number in `(0, 1]`, default 0.5. Prompt fraction of editor width.
+
+                                                       *ai-edit-option-height*
+height number in `(0, 1]`, default 0.2. Prompt fraction of usable height.
+
+                                                  *ai-edit-option-status-text*
+status.text non-empty string, default `AI is Working...`.
+
+                                                 *ai-edit-option-status-color*
+status.color six-digit hex string, default `#d946ef`.
+
+                                           *ai-edit-option-status-interval_ms*
+status.interval_ms positive integer, default 80.
+
+                                                *ai-edit-option-status-frames*
+status.frames non-empty string list, default 10-frame Braille spinner shown above.
+
+Unknown or malformed options fail with an `ai_edit:` error before an edit starts.
+
+==============================================================================
+3. MAPPINGS AND PROMPT                                  *ai-edit-mappings*
+                                                           *ai-edit-prompt*
+
+Configured key in Normal mode targets whole in-memory buffer. In characterwise
+or linewise Visual mode it targets exact selection and supplies full buffer as
+read-only context. Blockwise selection is rejected.
+
+Prompt mappings:
+  <CR>          Submit non-empty instruction.
+  <C-j>         Insert newline.
+  <C-p>/<C-n>   Recall older/newer instruction.
+  <Up>/<Down>   Navigate history only at first/last input line.
+  <Esc>         Close prompt without starting OpenCode.
+
+History stores newest 100 accepted exact multiline instructions in process memory
+only. It is not persisted.
+
+==============================================================================
+4. COMMANDS                                             *ai-edit-commands*
+
+                                                   *:AIEditCancel* *ai-edit-cancel*
+:AIEditCancel
+    Cancel edit for current target buffer. Staging is removed and target remains
+    unchanged. Lua equivalent: >lua
+      require('ai_edit').cancel()
+      require('ai_edit').cancel(bufnr)
+<
+==============================================================================
+5. STATUSLINE                                         *ai-edit-statusline*
+
+`require('ai_edit').statusline()` returns an escaped animated string while any
+job runs, otherwise empty string. `statusline_color()` returns `{ fg = color,
+gui = 'bold' }`. Lualine example: >lua
+  require('lualine').setup {
+    sections = {
+      lualine_x = {
+        {
+          require('ai_edit').statusline,
+          color = require('ai_edit').statusline_color,
+        },
+      },
+    },
+  }
+<
+Load lualine after ai-edit.nvim when using direct function references.
+
+==============================================================================
+6. HEALTH                                                 *ai-edit-health*
+
+:checkhealth ai_edit
+
+Checks Neovim, operating system, configured executable, and OpenCode version via
+`<command> --version` only. It does not load OpenCode tools/extensions, inspect
+credentials, contact a model, create a session, or modify cache. Provider,
+network, and trust conditions remain user confirmations. Edit preflight remains
+authoritative.
+
+==============================================================================
+7. SECURITY                                             *ai-edit-security*
+
+AI edit allows project read/glob/grep and one audited staging tool. It disables
+project OpenCode config, external configured plugins, custom provider npm
+packages, MCP, sharing, snapshots, formatters, LSP, shell, stock mutation, and
+unrelated agent tools. Stable OpenCode 1.x bundled provider/auth plugins remain
+trusted host code.
+
+This is not an operating-system sandbox. Project reads remain available and an
+in-project symlink can expose outside files. Use trusted worktrees only. The model
+cannot select a write destination. A result applies only after validated staging
+submission and unchanged target revision.
+
+==============================================================================
+8. DATA LIFECYCLE                                           *ai-edit-data*
+
+- Results remain modified and unsaved; one `u` restores pre-edit text.
+- Target locks while running; unrelated buffers remain editable.
+- Private staging is removed on terminal outcomes.
+- Version/source/executable-bound helper cache persists under
+  `stdpath('cache')/nvim-ai-edit` for offline reuse.
+- Observed sessions receive bounded deletion attempts. Crashes, unobserved
+  sessions, logs, or cleanup failures can leave data outside plugin control.
+- OpenCode and model/provider retention policies apply independently.
+
+Remove helper caches only while no edit is active.
+
+==============================================================================
+9. TROUBLESHOOTING                              *ai-edit-troubleshooting*
+
+Setup error             Fix named option type/range/unknown key.
+Executable missing      Run |ai-edit-health|; configure executable path.
+Unsupported version     Install stable OpenCode `>=1.18.21 <2.0.0`.
+Provider/auth failure   Configure and verify provider/model in OpenCode.
+Bootstrap failure       Restore network; keep private cache permissions.
+Unsafe configuration    Disable reported plugin/MCP/share/snapshot/LSP/mutation.
+Prompt unavailable      Use writable named file and sufficient cursor geometry.
+Stale result            Retry without changing target while work runs.
+Timeout                 Increase timeout_ms or reduce scope.
+Cleanup warning         Inspect retained OpenCode sessions/logs manually.
+
+Development and release instructions live in CONTRIBUTING.md.
+
+vim:tw=78:ts=8:noet:ft=help:norl:
