@@ -1161,6 +1161,22 @@ local function cleanup_environment(job)
   return environment, root
 end
 
+local function job_process(channel, detached)
+  local process_id = vim.fn.jobpid(channel)
+  return {
+    kill = function(_, signal)
+      return uv.kill(detached and -process_id or process_id, signal)
+    end,
+  }
+end
+
+local function job_environment(environment)
+  local result = copy_table(environment)
+  result.NVIM = ''
+  result.NVIM_LISTEN_ADDRESS = nil
+  return result
+end
+
 local function delete_session(job, session_id)
   if job.deleted_sessions[session_id] then
     return
@@ -1176,31 +1192,32 @@ local function delete_session(job, session_id)
       timer:close()
     end
   end
-  local ok
-  ok, process = pcall(vim.system, { job.options.command, 'session', 'delete', session_id }, {
+  local ok, channel = pcall(vim.fn.jobstart, { job.options.command, 'session', 'delete', session_id }, {
     cwd = job.project_root,
-    env = environment,
+    env = job_environment(environment),
     clear_env = true,
-    text = true,
-  }, function(result)
-    vim.schedule(function()
-      vim.fn.delete(cleanup_root, 'rf')
-      if finished then
-        return
-      end
-      finished = true
-      close_timer()
-      if result.code ~= 0 then
-        notify('could not delete OpenCode session ' .. session_id, vim.log.levels.WARN)
-      end
-    end)
-  end)
-  if not ok or not process then
+    stdin = 'null',
+    on_exit = function(_, code)
+      vim.schedule(function()
+        vim.fn.delete(cleanup_root, 'rf')
+        if finished then
+          return
+        end
+        finished = true
+        close_timer()
+        if code ~= 0 then
+          notify('could not delete OpenCode session ' .. session_id, vim.log.levels.WARN)
+        end
+      end)
+    end,
+  })
+  if not ok or channel <= 0 then
     close_timer()
     vim.fn.delete(cleanup_root, 'rf')
     notify('could not start OpenCode session cleanup for ' .. session_id, vim.log.levels.WARN)
     return
   end
+  process = job_process(channel, false)
   timer:start(job.options.cleanup_timeout_ms, 0, function()
     vim.schedule(function()
       if finished then
@@ -1488,72 +1505,90 @@ end
 
 local function launch_run(job)
   activity_phase(job, 'Running model')
-  local stdout_callback = function(error_message, data)
+  local stdout_done = false
+  local stderr_done = false
+  local exit_code
+  local completed = false
+
+  local function complete()
+    if completed or job.done or exit_code == nil or not stdout_done or not stderr_done then
+      return
+    end
+    completed = true
+    consume_stdout(job, nil, true)
+    if exit_code ~= 0 then
+      table.insert(job.errors, string.format('OpenCode exited with status %d', exit_code))
+    end
+    local stderr = table.concat(job.stderr)
+    if stderr:match '%S' then
+      table.insert(job.errors, stderr)
+    end
+    if exit_code ~= 0 or job.event_error or job.tool_error or job.parse_error then
+      finish(job, 'error', table.concat(job.errors, '\n'))
+      return
+    end
+    if job.submit_count ~= 1 then
+      finish(job, 'error', string.format('expected exactly one successful stage_text submit, received %d', job.submit_count))
+      return
+    end
+    local text, stage_error = validated_stage_result(job)
+    if not text then
+      finish(job, 'error', stage_error)
+      return
+    end
+    local application, application_error, application_outcome = apply_result(job, text)
+    if not application then
+      finish(job, application_outcome or 'stale', application_error)
+      return
+    end
+    finish(job, application)
+  end
+
+  local stdout_callback = function(_, data)
     vim.schedule(function()
-      if error_message then
-        table.insert(job.errors, tostring(error_message))
+      if #data == 1 and data[1] == '' then
+        stdout_done = true
+      else
+        consume_stdout(job, table.concat(data, '\n'), false)
       end
-      consume_stdout(job, data, false)
+      complete()
     end)
   end
-  local stderr_callback = function(error_message, data)
+  local stderr_callback = function(_, data)
     vim.schedule(function()
-      if error_message then
-        table.insert(job.errors, tostring(error_message))
+      if #data == 1 and data[1] == '' then
+        stderr_done = true
+      else
+        table.insert(job.stderr, table.concat(data, '\n'))
       end
-      if data then
-        table.insert(job.stderr, data)
-      end
+      complete()
     end)
   end
 
-  local ok, process = pcall(vim.system, { job.options.command, 'run', '--agent', job.agent, '--format', 'json' }, {
+  local ok, channel = pcall(vim.fn.jobstart, { job.options.command, 'run', '--agent', job.agent, '--format', 'json' }, {
     cwd = job.project_root,
-    env = job.environment,
+    env = job_environment(job.environment),
     clear_env = true,
-    text = true,
-    stdin = job.instruction,
-    stdout = stdout_callback,
-    stderr = stderr_callback,
-  }, function(system_result)
-    vim.schedule(function()
-      if job.done then
-        return
-      end
-      consume_stdout(job, nil, true)
-      if system_result.code ~= 0 then
-        table.insert(job.errors, string.format('OpenCode exited with status %d', system_result.code))
-      end
-      local stderr = table.concat(job.stderr)
-      if stderr:match '%S' then
-        table.insert(job.errors, stderr)
-      end
-      if system_result.code ~= 0 or job.event_error or job.tool_error or job.parse_error then
-        finish(job, 'error', table.concat(job.errors, '\n'))
-        return
-      end
-      if job.submit_count ~= 1 then
-        finish(job, 'error', string.format('expected exactly one successful stage_text submit, received %d', job.submit_count))
-        return
-      end
-      local text, stage_error = validated_stage_result(job)
-      if not text then
-        finish(job, 'error', stage_error)
-        return
-      end
-      local application, application_error, application_outcome = apply_result(job, text)
-      if not application then
-        finish(job, application_outcome or 'stale', application_error)
-        return
-      end
-      finish(job, application)
-    end)
-  end)
-  if not ok or not process then
-    finish(job, 'error', 'could not start OpenCode: ' .. tostring(process))
+    on_stdout = stdout_callback,
+    on_stderr = stderr_callback,
+    on_exit = function(_, code)
+      vim.schedule(function()
+        exit_code = code
+        complete()
+      end)
+    end,
+  })
+  if not ok or channel <= 0 then
+    finish(job, 'error', 'could not start OpenCode: ' .. tostring(channel))
     return
   end
-  job.process = process
+  job.process = job_process(channel, false)
+  local sent, send_result = pcall(vim.fn.chansend, channel, job.instruction)
+  local closed, close_result = pcall(vim.fn.chanclose, channel, 'stdin')
+  if not sent or send_result == 0 or not closed or close_result == 0 then
+    pcall(job.process.kill, job.process, 9)
+    finish(job, 'error', 'could not send OpenCode instruction')
+  end
 end
 
 local function decode_debug_output(result, label)
@@ -1571,7 +1606,6 @@ local function run_debug(job, arguments, label, callback, cwd, environment)
   local stdout = { chunks = {}, bytes = 0, done = false }
   local stderr = { chunks = {}, bytes = 0, done = false }
   local output_errors = {}
-  local process
   local process_id
   local exit_code
   local exit_signal
@@ -1602,18 +1636,14 @@ local function run_debug(job, arguments, label, callback, cwd, environment)
     end)
   end
 
-  local function capture(state, name, error_message, data)
+  local function capture(state, name, data)
     if state.done then
       return
     end
-    if error_message then
-      table.insert(output_errors, name .. ' read failed: ' .. tostring(error_message))
+    if #data == 1 and data[1] == '' then
       state.done = true
-      kill_group(9)
-      complete()
-      return
-    end
-    if data then
+    else
+      data = table.concat(data, '\n')
       local remaining = debug_output_max_bytes - state.bytes
       if #data <= remaining then
         table.insert(state.chunks, data)
@@ -1627,40 +1657,35 @@ local function run_debug(job, arguments, label, callback, cwd, environment)
         state.done = true
         kill_group(9)
       end
-    else
-      state.done = true
     end
     complete()
   end
 
   local command = { job.options.command }
   vim.list_extend(command, arguments)
-  local spawn_ok, spawned = pcall(vim.system, command, {
+  local spawn_ok, channel = pcall(vim.fn.jobstart, command, {
     cwd = cwd or job.project_root,
-    env = environment or job.environment or vim.fn.environ(),
+    env = job_environment(environment or job.environment or vim.fn.environ()),
     clear_env = true,
     detach = true,
-    stdout = function(error_message, data)
-      capture(stdout, 'stdout', error_message, data)
+    stdin = 'null',
+    on_stdout = function(_, data)
+      capture(stdout, 'stdout', data)
     end,
-    stderr = function(error_message, data)
-      capture(stderr, 'stderr', error_message, data)
+    on_stderr = function(_, data)
+      capture(stderr, 'stderr', data)
     end,
-  }, function(result)
-    exit_code = result.code
-    exit_signal = result.signal
-    complete()
-  end)
-  if not spawn_ok or not spawned then
-    return nil, label .. ': ' .. tostring(spawned)
+    on_exit = function(_, code)
+      exit_code = code
+      exit_signal = 0
+      complete()
+    end,
+  })
+  if not spawn_ok or channel <= 0 then
+    return nil, label .. ': ' .. tostring(channel)
   end
-  process = spawned
-  process_id = spawned.pid
-  return {
-    kill = function(_, signal)
-      return uv.kill(-process_id, signal)
-    end,
-  }
+  process_id = vim.fn.jobpid(channel)
+  return job_process(channel, true)
 end
 
 local function prepare_helper(job, callback)

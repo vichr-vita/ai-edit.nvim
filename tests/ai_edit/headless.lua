@@ -292,6 +292,7 @@ do
   equal(run.pure, '1', 'OPENCODE_PURE missing')
   equal(run.disableDefaultPlugins, nil, 'built-in authentication plugins unavailable')
   equal(run.context, nil, 'runtime inherited stale staging context')
+  equal(run.nvim, '', 'runtime inherited Neovim server capability')
   equal(run.disableProjectConfig, '1', 'project config not disabled')
   equal(run.xdgConfigHome, vim.fs.dirname(run.configDir), 'runtime global config directory was not isolated to helper cache')
   truthy(run.opencodeTestHome and run.opencodeTestHome:find(run.root, 1, true) == 1, 'legacy global extension home was not isolated')
@@ -325,6 +326,7 @@ do
   truthy(cleanup, 'session cleanup log missing')
   equal(cleanup.disableDefaultPlugins, nil, 'session cleanup inherited disabled authentication plugins')
   equal(cleanup.context, nil, 'session cleanup inherited stale staging context')
+  equal(cleanup.nvim, '', 'session cleanup inherited Neovim server capability')
   vim.env.OPENCODE_DISABLE_DEFAULT_PLUGINS = nil
   vim.env.NVIM_AI_EDIT_CONTEXT = nil
 end

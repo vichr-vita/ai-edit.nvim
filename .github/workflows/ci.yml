@@ -22,7 +22,7 @@ jobs:
             neovim: v0.11.4
           - os: ubuntu-24.04
             neovim: stable
-          - os: macos-14
+          - os: macos-15
             neovim: v0.12.5
     env:
       AI_EDIT_RUN_OAUTH_SMOKE: "0"

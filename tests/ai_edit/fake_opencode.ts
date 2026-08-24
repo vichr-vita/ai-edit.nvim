@@ -186,6 +186,7 @@ if (args[0] === "debug" && args[1] === "config") {
     disableProjectConfig: process.env.OPENCODE_DISABLE_PROJECT_CONFIG,
     xdgConfigHome: process.env.XDG_CONFIG_HOME,
     opencodeTestHome: process.env.OPENCODE_TEST_HOME,
+    nvim: process.env.NVIM,
   })
   await writeStdout(JSON.stringify(config()))
   process.exit(0)
@@ -251,6 +252,7 @@ if (args[0] === "session" && args[1] === "delete") {
     disableAutoshare: process.env.OPENCODE_DISABLE_AUTOSHARE,
     stageRoot: process.env.NVIM_AI_EDIT_STAGE_ROOT,
     context: process.env.NVIM_AI_EDIT_CONTEXT,
+    nvim: process.env.NVIM,
     cleanupConfig,
     toolsIsArray: Array.isArray(cleanupConfig.tools),
   })
@@ -313,6 +315,7 @@ await log({
   pure: process.env.OPENCODE_PURE,
   disableDefaultPlugins: process.env.OPENCODE_DISABLE_DEFAULT_PLUGINS,
   disableProjectConfig: process.env.OPENCODE_DISABLE_PROJECT_CONFIG,
+  nvim: process.env.NVIM,
   config: runtimeConfig,
 })
 
