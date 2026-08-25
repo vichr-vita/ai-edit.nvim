@@ -4,7 +4,7 @@ Apply focused AI edits to a Neovim buffer or visual selection through OpenCode. 
 
 ## Demo
 
-https://github.com/user-attachments/assets/14ae0b69-2acf-4879-be1d-93a92c5b7d1a
+[![Demo](docs/demo-preview.png)](https://github.com/user-attachments/assets/14ae0b69-2acf-4879-be1d-93a92c5b7d1a)
 
 ## Requirements
 
