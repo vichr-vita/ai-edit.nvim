@@ -23,7 +23,6 @@ vim.fn.mkdir(root, 'p', tonumber('700', 8))
 vim.o.columns = 120
 vim.o.lines = 40
 vim.env.AI_EDIT_FAKE_LOG = root .. '/fake.log'
-vim.env.AI_EDIT_GLOBAL_MODEL = 'test-provider/inherited-model'
 
 local notifications = {}
 vim.notify = function(message)
@@ -164,9 +163,9 @@ local ai_edit = require 'ai_edit'
 local function setup(overrides)
   local values = {
     keymap = '<F8>',
-    command = vim.env.AI_EDIT_FAKE_COMMAND or (vim.fn.getcwd() .. '/tests/ai_edit/fake_opencode.ts'),
+    config_dir = root .. '/pi-config',
+    command = vim.env.AI_EDIT_FAKE_COMMAND or (vim.fn.getcwd() .. '/tests/ai_edit/fake_pi.ts'),
     timeout_ms = 15000,
-    cleanup_timeout_ms = 300,
     max_bytes = 1024 * 1024,
     width = 0.6,
     height = 0.3,
@@ -180,7 +179,8 @@ end
 setup()
 
 if case == 'lock-basic' then
-  vim.env.AI_EDIT_FAKE_SCENARIO = 'parallel'
+  vim.env.AI_EDIT_FAKE_SCENARIO = 'run-gated'
+  vim.env.AI_EDIT_FAKE_RELEASE = root .. '/release'
   local target = open_file('lock-basic.lua', { 'local original = true', 'return original' })
   local original = buffer_lines(target)
   local changedtick = vim.api.nvim_buf_get_changedtick(target)
@@ -197,6 +197,7 @@ if case == 'lock-basic' then
   local unrelated = open_file('unrelated.lua', { 'writable' })
   vim.api.nvim_buf_set_lines(unrelated, 0, -1, false, { 'edited elsewhere' })
   equal(buffer_lines(unrelated), { 'edited elsewhere' }, 'unrelated buffer could not be edited')
+  vim.fn.writefile({}, vim.env.AI_EDIT_FAKE_RELEASE)
 
   wait_for(function()
     return vim.deep_equal(buffer_lines(target), { 'normal result' })
@@ -404,7 +405,7 @@ elseif case == 'activity-events' then
 
   wait_for(function()
     local value = transcript(target)
-    return value and value:find('DUPLICATE_NEW_TEXT', 1, true)
+    return value and value:find('STREAMED_CODE', 1, true)
   end, 'complete activity event stream did not appear')
   local buffer = assert(activity_buffer(target), 'activity buffer missing')
   local window = assert(activity_window(target), 'activity window missing')
@@ -422,17 +423,9 @@ elseif case == 'activity-events' then
   for _, expected in ipairs {
     'Request:\nshow activity request',
     'Phase: Preparing staging',
-    'Phase: Checking OpenCode version',
-    'Phase: Resolving global configuration',
-    'Phase: Preparing trusted helper',
-    'Phase: Checking runtime configuration',
-    'Phase: Checking edit agent',
     'Phase: Running model',
     'ASSISTANT_SAFE_TEXT',
-    'SAFE_GLOB_PATTERN',
-    'SAFE_GREP_PATTERN',
-    'read target',
-    'DUPLICATE_NEW_TEXT',
+    'STREAMED_CODE',
   } do
     truthy(value:find(expected, 1, true), 'activity transcript omitted ' .. expected)
   end
@@ -442,13 +435,12 @@ elseif case == 'activity-events' then
     'REPLACEMENT_SECRET',
     'UNKNOWN_PAYLOAD_SECRET',
     'UNKNOWN_TOOL_INPUT_SECRET',
-    'DUPLICATE_OLD_TEXT',
     'fake-session',
     '\1',
   } do
     truthy(not value:find(forbidden, 1, true), 'activity transcript exposed ' .. vim.inspect(forbidden))
   end
-  truthy(value:find('[private path]', 1, true) and value:find('[session]', 1, true), 'sensitive values were not redacted')
+  truthy(value:find('[private path]', 1, true), 'sensitive values were not redacted')
   equal(vim.api.nvim_win_get_cursor(window)[1], vim.api.nvim_buf_line_count(buffer), 'activity view did not scroll to newest line')
 
   local unrelated = make_buffer('activity-hidden.lua', { 'hide target' })
@@ -522,8 +514,7 @@ elseif case == 'activity-bounds' then
   end
 
   assert_bounds('activity-single-limit', 'SINGLE_ENTRY_TAIL', '[earlier entry truncated]')
-  assert_bounds('activity-aggregate-limit', 'AGGREGATE_ACTIVITY_TAIL', '[earlier activity truncated]', '000:')
-  assert_bounds('activity-keyed-growth', 'KEYED_GROWTH_TAIL', '[earlier activity truncated]', 'small-0')
+  assert_bounds('activity-chunked-limit', 'CHUNKED_ACTIVITY_TAIL', '[earlier entry truncated]', '000:')
 elseif case == 'terminal-matrix' then
   local function assert_clean(target, activity, message)
     if vim.api.nvim_buf_is_valid(target) then

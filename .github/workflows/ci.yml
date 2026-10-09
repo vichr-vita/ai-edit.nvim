@@ -24,8 +24,6 @@ jobs:
             neovim: stable
           - os: macos-15
             neovim: v0.12.5
-    env:
-      AI_EDIT_RUN_OAUTH_SMOKE: "0"
 
     steps:
       - name: Checkout
@@ -49,15 +47,21 @@ jobs:
         with:
           tool: stylua@2.0.2
 
-      - name: Install baseline OpenCode
-        run: bun add --global opencode-ai@1.18.21
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Pi
+        run: npm install --global --ignore-scripts @earendil-works/pi-coding-agent@1.1.0
 
       - name: Verify tool versions
         run: |
           bun --version
           nvim --version
           stylua --version
-          test "$(opencode --version)" = "1.18.21"
+          node --version
+          pi --version
 
       - name: Run required checks
         run: bun tests/ai_edit/run.ts all

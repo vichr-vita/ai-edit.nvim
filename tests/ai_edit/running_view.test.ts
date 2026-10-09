@@ -7,8 +7,8 @@ const cases = [
   ["rejects forced, renamed, unloaded, and deleted targets", "stale-targets"],
   ["suppresses hostile modifiable OptionSet handlers", "lock-optionset"],
   ["owns and restores guarded guicursor state", "cursor"],
-  ["renders passive allowlisted activity", "activity-events"],
-  ["bounds UTF-8 activity entries and aggregates", "activity-bounds"],
+  ["renders passive streamed code", "activity-events"],
+  ["bounds UTF-8 streamed activity", "activity-bounds"],
   ["tears down every terminal path", "terminal-matrix"],
 ] as const
 

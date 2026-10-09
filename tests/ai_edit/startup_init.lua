@@ -7,5 +7,5 @@ ai_edit.setup()
 assert(type(ai_edit.statusline()) == 'string', 'statusline is not callable')
 assert(type(ai_edit.statusline_color()) == 'table', 'statusline_color is not callable')
 ai_edit.cancel()
-assert(#vim.api.nvim_get_runtime_file('lua/ai_edit/stage_text.ts', false) == 1, 'trusted helper source is unavailable')
+assert(#vim.api.nvim_get_runtime_file('lua/ai_edit/prompt.md', false) == 1, 'code-only prompt is unavailable')
 vim.cmd 'qa'

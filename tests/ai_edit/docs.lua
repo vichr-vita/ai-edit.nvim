@@ -46,9 +46,9 @@ for _, text in ipairs { readme, help } do
     'keymap',
     'command',
     'model',
-    'variant',
+    'config_dir',
+    'thinking',
     'timeout_ms',
-    'cleanup_timeout_ms',
     'max_bytes',
     'width',
     'height',
@@ -59,14 +59,14 @@ for _, text in ipairs { readme, help } do
   } do
     truthy(text:find(name, 1, true), 'documentation omits option: ' .. name)
   end
-  truthy(text:find('>=1.18.21 <2.0.0', 1, true), 'documentation omits OpenCode range')
+  truthy(text:find('Pi', 1, true), 'documentation omits Pi')
   truthy(text:find('Neovim 0.11', 1, true), 'documentation omits Neovim boundary')
 end
 
 local ai_edit = require 'ai_edit'
 ai_edit.setup {
   keymap = '<F8>',
-  command = 'opencode',
+  command = 'pi',
   status = { color = '#d946ef' },
 }
 truthy(type(ai_edit.statusline()) == 'string', 'documented statusline example fails')
