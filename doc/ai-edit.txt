@@ -20,8 +20,7 @@ and can be reverted with one `u`. Blockwise selections are unsupported.
 ==============================================================================
 1. SETUP                                                   *ai-edit-setup*
 
-Requirements: Neovim 0.11+, macOS or Linux, and a current Pi CLI supporting
-JSON print mode and resource-isolation flags. Install Pi: >sh
+Requirements: Neovim 0.11+, macOS or Linux, Pi 1.1.0+, and Node.js 22.19+. Install Pi: >sh
   npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 <
 Lazy setup: >lua
@@ -89,7 +88,8 @@ width: fraction of editor width, greater than 0 and at most 1.
                                                        *ai-edit-option-height*
 height: fraction of usable editor height, greater than 0 and at most 1.
                                                        *ai-edit-option-status*
-status: text, color, interval_ms, and frames. text and each frame must be
+status: status.text, status.color, status.interval_ms, and status.frames.
+  text and each frame must be
   non-empty strings; frames must be a non-empty list. color must be a six-digit
   hex color. interval_ms must be a positive integer.
 
@@ -180,6 +180,8 @@ Prompt unavailable: use a named writable non-binary file and adequate space.
 Stale result: retry from the current buffer without changing it during the run.
 Timeout: increase timeout_ms or reduce request scope.
 
-The existing test suite and CI target OpenCode and need migration for Pi.
+Contributor checks: bun tests/ai_edit/run.ts all. Use fake or pi to run each
+check group separately. Installed Pi checks use a local provider stub and need
+no credentials. CI uses Pi 1.1.0 on Linux and macOS.
 
 vim:tw=78:ts=8:noet:ft=help:norl:

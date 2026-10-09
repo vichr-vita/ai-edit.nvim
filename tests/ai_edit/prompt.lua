@@ -24,7 +24,7 @@ end
 
 local root = vim.fn.tempname()
 vim.fn.mkdir(root, 'p', tonumber('700', 8))
-local fake = vim.env.AI_EDIT_FAKE_COMMAND or (vim.fn.getcwd() .. '/tests/ai_edit/fake_opencode.ts')
+local fake = vim.env.AI_EDIT_FAKE_COMMAND or (vim.fn.getcwd() .. '/tests/ai_edit/fake_pi.ts')
 vim.env.AI_EDIT_FAKE_LOG = root .. '/fake.log'
 vim.env.AI_EDIT_FAKE_SCENARIO = 'run-hold'
 
@@ -138,9 +138,9 @@ end
 local ai_edit = require 'ai_edit'
 local base_options = {
   keymap = '<F8>',
+  config_dir = root .. '/pi-config',
   command = fake,
   timeout_ms = 15000,
-  cleanup_timeout_ms = 500,
   max_bytes = 1024 * 1024,
   width = 0.5,
   height = 0.2,

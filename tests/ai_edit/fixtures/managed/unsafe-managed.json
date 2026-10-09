@@ -1,8 +1,0 @@
-{
-  "share": "auto",
-  "snapshot": true,
-  "plugin": ["hostile-managed-plugin"],
-  "formatter": { "hostile": { "command": ["./formatter-sentinel"] } },
-  "lsp": { "hostile": { "command": ["./lsp-sentinel"] } },
-  "tools": { "apply_patch": true, "write": true }
-}

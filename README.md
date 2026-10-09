@@ -9,7 +9,7 @@ Apply focused AI edits to a Neovim buffer or visual selection through headless [
 ## Requirements
 
 - Neovim 0.11 or newer on macOS or Linux.
-- A current Pi CLI supporting the [headless and resource-isolation flags](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/cli.md), available as `pi` or through `command`.
+- Pi 1.1.0 or newer, with Node.js 22.19 or newer, supporting the [headless and resource-isolation flags](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/cli.md), available as `pi` or through `command`.
 - A model and provider credentials configured for AI edit.
 
 Install Pi:
@@ -144,7 +144,13 @@ If authentication or model selection fails, configure Pi with `PI_CODING_AGENT_D
 
 ## Development
 
-The existing test suite and CI still target the previous OpenCode runner. They need migration before they can validate the Pi integration. No test migration or verification was performed with this change.
+Run the required checks:
+
+```sh
+bun tests/ai_edit/run.ts all
+```
+
+Use `fake` for the fixture-based checks or `pi` for the installed Pi integration alone. The integration uses a local provider stub and needs no credentials or billable requests. CI covers Neovim 0.11 and stable on Linux and stable on macOS, with Pi 1.1.0.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
 
