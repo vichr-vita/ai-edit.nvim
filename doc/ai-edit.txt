@@ -1,4 +1,4 @@
-*ai-edit.txt*                    Focused asynchronous AI edits through OpenCode
+*ai-edit.txt*                          Focused asynchronous AI edits through Pi
 
 ==============================================================================
 CONTENTS                                                        *ai-edit*
@@ -13,18 +13,17 @@ CONTENTS                                                        *ai-edit*
 8. Data lifecycle                                           |ai-edit-data|
 9. Troubleshooting                              |ai-edit-troubleshooting|
 
-AI edit targets a whole in-memory buffer or exact characterwise/linewise visual
-selection. Work runs asynchronously. Successful text remains unsaved and can be
-reverted with one `u`. Blockwise selections are unsupported.
+Edit a whole in-memory buffer or an exact characterwise/linewise selection.
+Pi runs headlessly with one code-only prompt. Successful results stay unsaved
+and can be reverted with one `u`. Blockwise selections are unsupported.
 
 ==============================================================================
 1. SETUP                                                   *ai-edit-setup*
 
-Requirements: Neovim 0.11+, macOS or Linux, and stable OpenCode
-`>=1.18.21 <2.0.0` with provider, model, and credentials configured. First use
-for each OpenCode version needs network access for the exact matching
-`@opencode-ai/plugin`. Use trusted worktrees only.
-
+Requirements: Neovim 0.11+, macOS or Linux, and a current Pi CLI supporting
+JSON print mode and resource-isolation flags. Install Pi: >sh
+  npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+<
 Lazy setup: >lua
   {
     'vichr-vita/ai-edit.nvim',
@@ -35,21 +34,30 @@ Lazy setup: >lua
 Other package managers must add the repository root to 'runtimepath', then: >lua
   require('ai_edit').setup({})
 <
-Setup is explicit. No mapping is installed before setup runs. Repeated setup
-removes prior package mappings when the key changes and replaces package command
-and autocommands. Active jobs keep captured options and process state.
+Configure a model and credentials in the dedicated Pi directory. Its default
+is stdpath('config') .. '/ai-edit/pi', normally ~/.config/nvim/ai-edit/pi.
+For subscription authentication, start Pi separately: >sh
+  PI_CODING_AGENT_DIR="$HOME/.config/nvim/ai-edit/pi" pi
+<
+Run /login, then choose and save a model with /model. For API keys, export your
+provider key before starting Neovim and set the plugin's model option.
+
+Only defaultProvider and defaultModel are read from settings.json. auth.json
+and models.json are linked into each private run configuration. OAuth refreshes
+update credentials in the dedicated directory. Regular Pi settings and project
+configuration are not inherited.
 
 ==============================================================================
 2. OPTIONS                                               *ai-edit-options*
 
-Full defaults: >lua
+Defaults: >lua
   require('ai_edit').setup {
     keymap = '<leader>ai',
-    command = 'opencode',
+    command = 'pi',
+    config_dir = vim.fn.stdpath('config') .. '/ai-edit/pi',
     model = false,
-    variant = false,
+    thinking = 'off',
     timeout_ms = 300000,
-    cleanup_timeout_ms = 2000,
     max_bytes = 1048576,
     width = 0.5,
     height = 0.2,
@@ -62,147 +70,116 @@ Full defaults: >lua
   }
 <
                                                        *ai-edit-option-keymap*
-keymap string, default `<leader>ai`. Non-empty global normal/visual mapping.
-
+keymap: non-empty global normal and visual mapping.
                                                       *ai-edit-option-command*
-command string, default `opencode`. Executable name/path without shell arguments.
-
+command: executable name or path, without shell arguments.
+                                                   *ai-edit-option-config_dir*
+config_dir: dedicated Pi model and authentication configuration directory.
                                                         *ai-edit-option-model*
-model string or false, default false. `provider/model`; false inherits resolved
-OpenCode configuration.
-
-                                                      *ai-edit-option-variant*
-variant string or false, default false. Non-empty and requires explicit model.
-
+model: false or provider/model text. false uses the dedicated Pi defaults.
+                                                     *ai-edit-option-thinking*
+thinking: off, minimal, low, medium, high, xhigh, or max. Pi clamps the level
+  to model capabilities. Default off prioritizes immediate code output.
                                                    *ai-edit-option-timeout_ms*
-timeout_ms positive integer, default 300000. Bounds preflight, bootstrap, run.
-
-                                           *ai-edit-option-cleanup_timeout_ms*
-cleanup_timeout_ms positive integer, default 2000. Bounds each session deletion.
-
+timeout_ms: positive integer limiting run duration.
                                                     *ai-edit-option-max_bytes*
-max_bytes positive integer, default 1048576. Full buffer must fit for all edits.
-
+max_bytes: positive integer limiting the full buffer and replacement sizes.
                                                         *ai-edit-option-width*
-width number in `(0, 1]`, default 0.5. Prompt fraction of editor width.
-
+width: fraction of editor width, greater than 0 and at most 1.
                                                        *ai-edit-option-height*
-height number in `(0, 1]`, default 0.2. Prompt fraction of usable height.
+height: fraction of usable editor height, greater than 0 and at most 1.
+                                                       *ai-edit-option-status*
+status: text, color, interval_ms, and frames. text and each frame must be
+  non-empty strings; frames must be a non-empty list. color must be a six-digit
+  hex color. interval_ms must be a positive integer.
 
-                                                  *ai-edit-option-status-text*
-status.text non-empty string, default `AI is Working...`.
-
-                                                 *ai-edit-option-status-color*
-status.color six-digit hex string, default `#d946ef`.
-
-                                           *ai-edit-option-status-interval_ms*
-status.interval_ms positive integer, default 80.
-
-                                                *ai-edit-option-status-frames*
-status.frames non-empty string list, default 10-frame Braille spinner shown above.
-
-Unknown or malformed options fail with an `ai_edit:` error before an edit starts.
+Unknown or invalid options fail during setup. OpenCode's variant and
+cleanup_timeout_ms options have been removed. Use thinking for reasoning level.
+Repeated setup replaces package mappings, commands, and autocommands.
+Active jobs retain their captured options.
 
 ==============================================================================
 3. MAPPINGS AND PROMPT                                  *ai-edit-mappings*
-                                                           *ai-edit-prompt*
 
-Configured key in Normal mode targets whole in-memory buffer. In characterwise
-or linewise Visual mode it targets exact selection and supplies full buffer as
-read-only context. Blockwise selection is rejected.
+Normal mode edits the whole buffer. Characterwise and linewise visual mode
+replace only the selection, using the full buffer as read-only context.
 
-Prompt mappings:
-  <CR>          Submit non-empty instruction.
-  <C-j>         Insert newline.
-  <C-p>/<C-n>   Recall older/newer instruction.
-  <Up>/<Down>   Navigate history only at first/last input line.
-  <Esc>         Close prompt without starting OpenCode.
+<CR> submits a non-empty instruction. <C-j> inserts a newline.
+<C-p>/<C-n> recall older/newer instructions. <Up>/<Down> navigate history at
+first/last input lines. <Esc> closes the prompt.
 
-History stores newest 100 accepted exact multiline instructions in process memory
-only. It is not persisted.
+History stores the newest 100 accepted instructions in memory only. The fixed
+code-only prompt is lua/ai_edit/prompt.md. It requests replacement code
+immediately, with no fences, explanations, questions, tests, or verification.
 
 ==============================================================================
 4. COMMANDS                                             *ai-edit-commands*
 
-                                                   *:AIEditCancel* *ai-edit-cancel*
-:AIEditCancel
-    Cancel edit for current target buffer. Staging is removed and target remains
-    unchanged. Lua equivalent: >lua
-      require('ai_edit').cancel()
-      require('ai_edit').cancel(bufnr)
+:AIEditCancel                                           *:AIEditCancel*
+  Cancel active work for the current target buffer.
+
+Lua: >lua
+  require('ai_edit').cancel()       -- Current buffer.
+  require('ai_edit').cancel(bufnr)  -- Specific buffer.
 <
+Cancellation and timeout discard output and leave target text unchanged.
+
 ==============================================================================
 5. STATUSLINE                                         *ai-edit-statusline*
 
-`require('ai_edit').statusline()` returns an escaped animated string while any
-job runs, otherwise empty string. `statusline_color()` returns `{ fg = color,
-gui = 'bold' }`. Lualine example: >lua
-  require('lualine').setup {
-    sections = {
-      lualine_x = {
-        {
-          require('ai_edit').statusline,
-          color = require('ai_edit').statusline_color,
-        },
-      },
-    },
+statusline() returns an escaped animated indicator during work, or an empty
+string while idle. statusline_color() returns a lualine-compatible color table.
+Example: >lua
+  {
+    require('ai_edit').statusline,
+    color = require('ai_edit').statusline_color,
   }
 <
-Load lualine after ai-edit.nvim when using direct function references.
+Load lualine after AI edit when using direct function references. The target
+stays locked while Pi runs; other buffers remain usable. The activity view
+shows streamed code. Completed output applies as one undoable edit.
 
 ==============================================================================
 6. HEALTH                                                 *ai-edit-health*
 
-:checkhealth ai_edit
-
-Checks Neovim, operating system, configured executable, and OpenCode version via
-`<command> --version` only. It does not load OpenCode tools/extensions, inspect
-credentials, contact a model, create a session, or modify cache. Provider,
-network, and trust conditions remain user confirmations. Edit preflight remains
-authoritative.
+:checkhealth ai_edit checks Neovim, operating-system support, and Pi executable
+discovery. It reports config_dir without launching Pi or contacting a model.
 
 ==============================================================================
 7. SECURITY                                             *ai-edit-security*
 
-AI edit allows project read/glob/grep and one audited staging tool. It disables
-project OpenCode config, external configured plugins, custom provider npm
-packages, MCP, sharing, snapshots, formatters, LSP, shell, stock mutation, and
-unrelated agent tools. Stable OpenCode 1.x bundled provider/auth plugins remain
-trusted host code.
+Each edit runs once with an attached read-only snapshot of the unsaved buffer.
+The model has no tools. Extensions, MCP, skills, prompt templates, context files,
+themes, project configuration, and saved sessions are disabled. The model cannot
+read other files or execute commands. The plugin applies the final response.
 
-This is not an operating-system sandbox. Project reads remain available and an
-in-project symlink can expose outside files. Use trusted worktrees only. The model
-cannot select a write destination. A result applies only after validated staging
-submission and unchanged target revision.
+Private run settings disable compaction, retries, telemetry, cache warming, and
+automatic network activity. Model requests and credential refreshes still use
+the network. Local auth.json and models.json are trusted configuration.
 
 ==============================================================================
 8. DATA LIFECYCLE                                           *ai-edit-data*
 
-- Results remain modified and unsaved; one `u` restores pre-edit text.
-- Target locks while running; unrelated buffers remain editable.
-- Private staging is removed on terminal outcomes.
-- Version/source/executable-bound helper cache persists under
-  `stdpath('cache')/nvim-ai-edit` for offline reuse.
-- Observed sessions receive bounded deletion attempts. Crashes, unobserved
-  sessions, logs, or cleanup failures can leave data outside plugin control.
-- OpenCode and model/provider retention policies apply independently.
+Results stay modified and unsaved. Press u once to restore the prior text.
+The target must still match its captured revision before a result applies.
+Incomplete or failed Pi responses are discarded.
 
-Remove helper caches only while no edit is active.
+Prompt and activity buffers disable swap. Activity output is bounded.
+Staging files and run configuration are removed on completion or cancellation.
+Dedicated credentials persist. A crash can leave staging data under
+stdpath('cache')/nvim-ai-edit/staging. Provider retention policies apply.
 
 ==============================================================================
 9. TROUBLESHOOTING                              *ai-edit-troubleshooting*
 
-Setup error             Fix named option type/range/unknown key.
-Executable missing      Run |ai-edit-health|; configure executable path.
-Unsupported version     Install stable OpenCode `>=1.18.21 <2.0.0`.
-Provider/auth failure   Configure and verify provider/model in OpenCode.
-Bootstrap failure       Restore network; keep private cache permissions.
-Unsafe configuration    Disable reported plugin/MCP/share/snapshot/LSP/mutation.
-Prompt unavailable      Use writable named file and sufficient cursor geometry.
-Stale result            Retry without changing target while work runs.
-Timeout                 Increase timeout_ms or reduce scope.
-Cleanup warning         Inspect retained OpenCode sessions/logs manually.
+Executable not found: install Pi or set command to its executable path.
+Unknown Pi option: update Pi to a current release.
+Authentication/model error: configure Pi with PI_CODING_AGENT_DIR=config_dir.
+Setup error: correct the named option. variant and cleanup_timeout_ms are gone.
+Prompt unavailable: use a named writable non-binary file and adequate space.
+Stale result: retry from the current buffer without changing it during the run.
+Timeout: increase timeout_ms or reduce request scope.
 
-Development and release instructions live in CONTRIBUTING.md.
+The existing test suite and CI target OpenCode and need migration for Pi.
 
 vim:tw=78:ts=8:noet:ft=help:norl:

@@ -2,11 +2,7 @@ local M = {}
 
 local uv = vim.uv or vim.loop
 local health_state = require 'ai_edit.health_state'
-local version_policy = require 'ai_edit.version'
-local helper_cache_version = '5'
-local output_limit = { max_bytes = 32768, max_lines = 10 }
 local activity_limit = { max_bytes = 8192, max_lines = 120, entry_bytes = 2048, entry_lines = 24 }
-local debug_output_max_bytes = 1024 * 1024
 local history_limit = 100
 local hidden_cursor_segment = 'n-v-ve-o-i-r-sm:AIEditHiddenCursor'
 local jobs = {}
@@ -21,11 +17,11 @@ local cursor_state = {
 }
 local options = {
   keymap = '<leader>ai',
-  command = 'opencode',
+  command = 'pi',
+  config_dir = vim.fn.stdpath 'config' .. '/ai-edit/pi',
   model = false,
-  variant = false,
+  thinking = 'off',
   timeout_ms = 5 * 60 * 1000,
-  cleanup_timeout_ms = 2000,
   max_bytes = 1024 * 1024,
   width = 0.5,
   height = 0.2,
@@ -35,25 +31,6 @@ local options = {
     interval_ms = 80,
     frames = { '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏' },
   },
-}
-
-local safe_tools = {
-  invalid = false,
-  read = true,
-  glob = true,
-  grep = true,
-  stage_text = true,
-  apply_patch = false,
-  edit = false,
-  write = false,
-  bash = false,
-  webfetch = false,
-  websearch = false,
-  codesearch = false,
-  task = false,
-  todowrite = false,
-  question = false,
-  skill = false,
 }
 
 local function notify(message, level)
@@ -328,9 +305,6 @@ local function redact_activity(job, text)
       text = text:gsub(vim.pesc(value), '[private path]')
     end
   end
-  for session_id in pairs(job.sessions or {}) do
-    text = text:gsub(vim.pesc(session_id), '[session]')
-  end
   return text
 end
 
@@ -512,10 +486,10 @@ local function validate_target(job, expected_modifiable)
     return nil, 'target buffer now refers to another file'
   end
   if buffer_text(job.buffer) ~= job.full_text then
-    return nil, 'target buffer text changed while OpenCode was running'
+    return nil, 'target buffer text changed while Pi was running'
   end
   if vim.api.nvim_buf_get_changedtick(job.buffer) ~= job.changedtick then
-    return nil, 'target buffer changed while OpenCode was running'
+    return nil, 'target buffer changed while Pi was running'
   end
   return true
 end
@@ -732,386 +706,87 @@ local function cleanup(job)
   if job.stage_root then
     vim.fn.delete(job.stage_root, 'rf')
   end
-  if job.helper_build then
-    vim.fn.delete(job.helper_build, 'rf')
-  end
 end
 
+-- Each run gets a buffer snapshot and a fixed configuration, with no project discovery.
 local function create_staging(job)
   local parent = vim.fn.stdpath 'cache' .. '/nvim-ai-edit/staging'
   local ok, error_message = private_directory(parent)
   if not ok then
     return nil, 'cannot create private staging parent: ' .. tostring(error_message)
   end
-  local root = parent .. '/' .. random_id()
-  ok, error_message = private_directory(root)
+  job.stage_root = parent .. '/' .. random_id()
+  ok, error_message = private_directory(job.stage_root)
   if not ok then
     return nil, 'cannot create private staging directory: ' .. tostring(error_message)
   end
-  job.stage_root = root
 
-  local extension = vim.fn.fnamemodify(job.path, ':e')
-  local suffix = extension == '' and '' or '.' .. extension
-  job.stage_target = root .. '/target' .. suffix
-  ok, error_message = write_file(job.stage_target, job.target_text)
+  local extension = vim.fn.fnamemodify(job.path, ':e'):gsub('[^%w_-]', '')
+  job.stage_target = job.stage_root .. '/reference' .. (extension == '' and '' or '.' .. extension)
+  ok, error_message = write_file(job.stage_target, job.full_text, tonumber('400', 8))
   if not ok then
-    return nil, 'cannot write staging target: ' .. tostring(error_message)
+    return nil, 'cannot write reference file: ' .. tostring(error_message)
   end
 
-  if job.target.kind ~= 'whole' then
-    job.stage_context = root .. '/context' .. suffix
-    ok, error_message = write_file(job.stage_context, job.full_text, tonumber('400', 8))
-    if not ok then
-      return nil, 'cannot write read-only context: ' .. tostring(error_message)
+  local agent_dir = job.stage_root .. '/pi'
+  ok, error_message = private_directory(agent_dir)
+  if not ok then
+    return nil, 'cannot create Pi configuration: ' .. tostring(error_message)
+  end
+  local settings = {
+    defaultThinkingLevel = job.options.thinking,
+    defaultTools = vim.json.decode '[]',
+    compaction = { enabled = false },
+    retry = { enabled = false, provider = { maxRetries = 0 } },
+    cacheWarming = 'off',
+    quietStartup = true,
+    enableInstallTelemetry = false,
+    enableAnalytics = false,
+  }
+  local config_dir = vim.fn.fnamemodify(vim.fn.expand(job.options.config_dir), ':p'):gsub('/$', '')
+  local configured = read_file(config_dir .. '/settings.json')
+  if configured then
+    local decoded, value = pcall(vim.json.decode, configured)
+    if not decoded or type(value) ~= 'table' then
+      return nil, 'invalid Pi settings.json in ' .. config_dir
     end
-    uv.fs_chmod(job.stage_context, tonumber('400', 8))
-  end
-  return true
-end
-
-local function helper_source(command, opencode_version)
-  local source_paths = vim.api.nvim_get_runtime_file('lua/ai_edit/stage_text.ts', false)
-  local source_path = source_paths[1]
-  if not source_path then
-    return nil, 'trusted stage_text helper source is missing'
-  end
-  local source, read_error = read_file(source_path)
-  if not source then
-    return nil, 'cannot read trusted stage_text helper: ' .. tostring(read_error)
-  end
-  local parent = vim.fn.stdpath 'cache' .. '/nvim-ai-edit'
-  local resolved_command = vim.fn.exepath(command)
-  if resolved_command == '' then
-    resolved_command = command
-  end
-  local root = parent
-    .. '/helper-'
-    .. helper_cache_version
-    .. '-'
-    .. opencode_version
-    .. '-'
-    .. vim.fn.sha256(source):sub(1, 16)
-    .. '-'
-    .. vim.fn.sha256(resolved_command):sub(1, 12)
-  return { source = source, version = opencode_version, parent = parent, root = root, cache = root .. '/opencode' }
-end
-
-local function verify_helper_cache(cache, source, opencode_version)
-  local status = uv.fs_lstat(cache)
-  if not status or status.type ~= 'directory' then
-    return nil, 'published helper cache is missing'
-  end
-  for _, path in ipairs {
-    cache .. '/tool/stage_text.ts',
-    cache .. '/package.json',
-    cache .. '/node_modules/@opencode-ai/plugin/package.json',
-    cache .. '/node_modules/@opencode-ai/plugin/dist/index.js',
-  } do
-    local file_status = uv.fs_lstat(path)
-    if not file_status or file_status.type ~= 'file' then
-      return nil, 'published helper cache contains a missing or redirected required file'
-    end
-  end
-  local installed_source, source_error = read_file(cache .. '/tool/stage_text.ts')
-  if installed_source ~= source then
-    return nil, 'published helper source differs from trusted source: ' .. tostring(source_error or '')
-  end
-  local manifest_text, manifest_error = read_file(cache .. '/package.json')
-  if not manifest_text then
-    return nil, 'published helper manifest is unreadable: ' .. tostring(manifest_error)
-  end
-  local manifest_ok, manifest = pcall(vim.json.decode, manifest_text)
-  if
-    not manifest_ok
-    or type(manifest) ~= 'table'
-    or type(manifest.dependencies) ~= 'table'
-    or manifest.dependencies['@opencode-ai/plugin'] ~= opencode_version
-  then
-    return nil, 'published helper manifest has wrong dependency version'
-  end
-  local package_text, package_error = read_file(cache .. '/node_modules/@opencode-ai/plugin/package.json')
-  if not package_text then
-    return nil, 'published helper dependency is unreadable: ' .. tostring(package_error)
-  end
-  local package_ok, package = pcall(vim.json.decode, package_text)
-  if not package_ok or type(package) ~= 'table' or package.version ~= opencode_version then
-    return nil, 'published helper dependency has wrong version'
-  end
-  return true
-end
-
-local function seal_helper_cache(path)
-  local status = uv.fs_lstat(path)
-  if not status then
-    return nil, 'cannot inspect helper cache entry'
-  end
-  if status.type == 'link' then
-    return true
-  end
-  if status.type == 'directory' then
-    local scanner, scan_error = uv.fs_scandir(path)
-    if not scanner then
-      return nil, scan_error
-    end
-    while true do
-      local name = uv.fs_scandir_next(scanner)
-      if not name then
-        break
-      end
-      local ok, error_message = seal_helper_cache(path .. '/' .. name)
-      if not ok then
-        return nil, error_message
-      end
-    end
-    return uv.fs_chmod(path, tonumber('500', 8))
-  end
-  return uv.fs_chmod(path, tonumber('400', 8))
-end
-
-local function discard_helper_build(path)
-  local status = uv.fs_lstat(path)
-  if not status then
-    return
-  end
-  if status.type == 'directory' then
-    uv.fs_chmod(path, tonumber('700', 8))
-    local scanner = uv.fs_scandir(path)
-    if scanner then
-      while true do
-        local name = uv.fs_scandir_next(scanner)
-        if not name then
-          break
+    for _, key in ipairs { 'defaultProvider', 'defaultModel' } do
+      if value[key] ~= nil then
+        if type(value[key]) ~= 'string' or value[key] == '' then
+          return nil, 'Pi ' .. key .. ' must be non-empty text'
         end
-        discard_helper_build(path .. '/' .. name)
+        settings[key] = value[key]
       end
     end
-  elseif status.type ~= 'link' then
-    uv.fs_chmod(path, tonumber('600', 8))
   end
-  if status.type == 'directory' then
-    vim.fn.delete(path, 'rf')
-  else
-    vim.fn.delete(path)
-  end
-end
-
-local function materialize_helper_build(info)
-  local ok, error_message = private_directory(info.parent)
+  ok, error_message = write_file(agent_dir .. '/settings.json', vim.json.encode(settings))
   if not ok then
-    return nil, 'cannot create trusted helper parent: ' .. tostring(error_message)
+    return nil, 'cannot write Pi settings: ' .. tostring(error_message)
   end
-  local root = info.parent .. '/.helper-build-' .. random_id()
-  local cache = root .. '/opencode'
-  local tool_directory = cache .. '/tool'
-  ok, error_message = private_directory(tool_directory)
-  if not ok then
-    return nil, 'cannot create trusted helper build: ' .. tostring(error_message)
-  end
-  ok, error_message = write_file(tool_directory .. '/stage_text.ts', info.source)
-  if not ok then
-    vim.fn.delete(root, 'rf')
-    return nil, 'cannot materialize trusted helper: ' .. tostring(error_message)
-  end
-  local manifest = vim.json.encode { dependencies = { ['@opencode-ai/plugin'] = info.version } }
-  ok, error_message = write_file(cache .. '/package.json', manifest)
-  if not ok then
-    vim.fn.delete(root, 'rf')
-    return nil, 'cannot materialize helper dependency manifest: ' .. tostring(error_message)
-  end
-  return { root = root, cache = cache }
-end
-
-local function isolated_environment(job, cache, config, suffix)
-  local environment = vim.fn.environ()
-  local isolation = job.stage_root .. '/' .. suffix
-  private_directory(isolation .. '/home')
-  if cache then
-    environment.XDG_CONFIG_HOME = vim.fs.dirname(cache)
-  else
-    private_directory(isolation .. '/config')
-    environment.XDG_CONFIG_HOME = isolation .. '/config'
-  end
-  environment.OPENCODE_TEST_HOME = isolation .. '/home'
-  environment.OPENCODE_CONFIG = nil
-  environment.OPENCODE_CONFIG_DIR = cache
-  environment.OPENCODE_CONFIG_CONTENT = vim.json.encode(config)
-  environment.OPENCODE_PURE = '1'
-  environment.OPENCODE_DISABLE_DEFAULT_PLUGINS = nil
-  environment.OPENCODE_DISABLE_PROJECT_CONFIG = '1'
-  environment.OPENCODE_DISABLE_AUTOSHARE = '1'
-  environment.NVIM_AI_EDIT_STAGE_ROOT = job.stage_root
-  environment.NVIM_AI_EDIT_STAGE_TARGET = job.stage_target
-  environment.NVIM_AI_EDIT_MAX_BYTES = tostring(job.options.max_bytes)
-  environment.NVIM_AI_EDIT_CONTEXT = job.stage_context
-  return environment
-end
-
-local function runtime_environment(job)
-  return isolated_environment(job, job.cache, job.config, 'runtime')
-end
-
-local function global_config_environment(job)
-  local environment = vim.fn.environ()
-  environment.OPENCODE_CONFIG_CONTENT = vim.json.encode(job.config)
-  environment.OPENCODE_PURE = '1'
-  environment.OPENCODE_DISABLE_DEFAULT_PLUGINS = nil
-  environment.OPENCODE_DISABLE_PROJECT_CONFIG = '1'
-  environment.OPENCODE_DISABLE_AUTOSHARE = '1'
-  return environment
-end
-
-local function restricted_config(job)
-  local permission = {
-    invalid = 'deny',
-    read = 'allow',
-    glob = 'allow',
-    grep = 'allow',
-    stage_text = 'allow',
-    apply_patch = 'deny',
-    edit = 'deny',
-    write = 'deny',
-    bash = 'deny',
-    webfetch = 'deny',
-    websearch = 'deny',
-    codesearch = 'deny',
-    task = 'deny',
-    todowrite = 'deny',
-    question = 'deny',
-    skill = 'deny',
-    external_directory = 'deny',
-    lsp = 'deny',
-  }
-  local prompt = table.concat({
-    'Edit only the host-selected staging target through stage_text.',
-    'Use stage_text read pages as authoritative unsaved target content; context is read-only.',
-    'Submit exactly once with the current revision using exact operations or a complete replacement.',
-    'On submit, omit source or set it to target; never submit context.',
-    'Never mutate project files. Project reads are context only.',
-    'Original file: ' .. job.path,
-    'Project root: ' .. job.project_root,
-    'Target scope: ' .. (job.target.label or 'whole buffer'),
-  }, '\n')
-  local agent = {
-    mode = 'primary',
-    disable = false,
-    prompt = prompt,
-    permission = copy_table(permission),
-  }
-  if job.options.model then
-    agent.model = job.options.model
-    agent.variant = job.options.variant or nil
-  end
-  return {
-    share = 'disabled',
-    snapshot = false,
-    formatter = false,
-    lsp = false,
-    plugin = vim.json.decode '[]',
-    tool_output = copy_table(output_limit),
-    tools = copy_table(safe_tools),
-    permission = permission,
-    agent = {
-      [job.agent] = agent,
-    },
-  }
-end
-
-local function enabled_tools(value)
-  local result = {}
-  for name, enabled in pairs(value or {}) do
-    if enabled == true then
-      table.insert(result, name)
+  -- Keep OAuth refreshes in the dedicated local config; no credentials enter the prompt.
+  for _, name in ipairs { 'auth.json', 'models.json' } do
+    local source = config_dir .. '/' .. name
+    if uv.fs_stat(source) then
+      ok, error_message = uv.fs_symlink(source, agent_dir .. '/' .. name)
+      if not ok then
+        return nil, 'cannot link Pi ' .. name .. ': ' .. tostring(error_message)
+      end
     end
   end
-  table.sort(result)
-  return result
-end
 
-local expected_enabled_tools = { 'glob', 'grep', 'read', 'stage_text' }
-
-local function contains_provider_package(value)
-  if type(value) ~= 'table' then
-    return false
-  end
-  if value.npm ~= nil then
-    return true
-  end
-  for _, child in pairs(value) do
-    if contains_provider_package(child) then
-      return true
-    end
-  end
-  return false
-end
-
-local function validate_resolved_config(config)
-  if type(config) ~= 'table' then
-    return nil, 'resolved config is not an object'
-  end
-  if config.share ~= 'disabled' then
-    return nil, 'sharing is not disabled'
-  end
-  if config.snapshot ~= false then
-    return nil, 'snapshots are not disabled'
-  end
-  if config.formatter ~= false then
-    return nil, 'formatters are not disabled'
-  end
-  if config.lsp ~= false then
-    return nil, 'LSP is not disabled'
-  end
-  if type(config.plugin) ~= 'table' or not vim.tbl_isempty(config.plugin) then
-    return nil, 'configured plugins are not disabled'
-  end
-  if config.mcp ~= nil and (type(config.mcp) ~= 'table' or not vim.tbl_isempty(config.mcp)) then
-    return nil, 'MCP servers are configured'
-  end
-  if not vim.deep_equal(config.tool_output, output_limit) then
-    return nil, 'tool output limits differ from 32768 bytes and 10 lines'
-  end
-  if not vim.deep_equal(enabled_tools(config.tools), expected_enabled_tools) then
-    return nil, 'resolved enabled tools differ from read, glob, grep, and stage_text'
-  end
-  if config.provider ~= nil and type(config.provider) ~= 'table' then
-    return nil, 'provider configuration is not an object'
-  end
-  for name, provider in pairs(config.provider or {}) do
-    if contains_provider_package(provider) then
-      return nil, 'provider ' .. name .. ' loads a custom npm package'
-    end
-  end
-  for name, allowed in pairs(safe_tools) do
-    if allowed == false and config.tools[name] == true then
-      return nil, name .. ' is enabled'
-    end
-  end
-  return true
-end
-
-local function validate_resolved_agent(agent, expected_name, expected_model, expected_variant)
-  if type(agent) ~= 'table' or agent.name ~= expected_name then
-    return nil, 'runtime agent resolution does not match unique agent'
-  end
-  if agent.mode ~= 'primary' or (agent.disable ~= nil and agent.disable ~= false) then
-    return nil, 'runtime primary agent is disabled or has wrong mode'
-  end
-  if not vim.deep_equal(enabled_tools(agent.tools), expected_enabled_tools) then
-    return nil, 'runtime agent enabled tools differ from read, glob, grep, and stage_text'
-  end
-  if expected_model then
-    local provider, model = expected_model:match '^([^/]+)/(.+)$'
-    if type(agent.model) ~= 'table' or agent.model.providerID ~= provider or agent.model.modelID ~= model then
-      return nil, 'runtime agent model differs from configured model'
-    end
-    if agent.variant ~= expected_variant then
-      return nil, 'runtime agent variant differs from configured variant'
-    end
-  end
+  job.environment = vim.fn.environ()
+  job.environment.PI_CODING_AGENT_DIR = agent_dir
+  job.environment.PI_CODING_AGENT_SESSION_DIR = nil
+  job.environment.PI_OFFLINE = '1'
+  job.environment.PI_SKIP_VERSION_CHECK = '1'
+  job.environment.PI_TELEMETRY = '0'
+  job.environment.NVIM = ''
+  job.environment.NVIM_LISTEN_ADDRESS = nil
   return true
 end
 
 local function show_error(message)
-  local lines = vim.split(message ~= '' and message or 'Unknown OpenCode failure', '\n', { plain = true })
+  local lines = vim.split(message ~= '' and message or 'Unknown Pi failure', '\n', { plain = true })
   local buffer = vim.api.nvim_create_buf(false, true)
   vim.bo[buffer].buftype = 'nofile'
   vim.bo[buffer].bufhidden = 'wipe'
@@ -1133,34 +808,6 @@ local function show_error(message)
   })
 end
 
-local function cleanup_environment(job)
-  local root = vim.fn.stdpath 'cache' .. '/nvim-ai-edit/session-cleanup/' .. random_id()
-  private_directory(root .. '/config')
-  private_directory(root .. '/home')
-  local environment = vim.fn.environ()
-  environment.XDG_CONFIG_HOME = root .. '/config'
-  environment.OPENCODE_TEST_HOME = root .. '/home'
-  environment.OPENCODE_CONFIG = nil
-  environment.OPENCODE_CONFIG_DIR = nil
-  environment.OPENCODE_CONFIG_CONTENT = vim.json.encode {
-    share = 'disabled',
-    snapshot = false,
-    formatter = false,
-    lsp = false,
-    plugin = vim.json.decode '[]',
-    tools = vim.json.decode '{}',
-  }
-  environment.OPENCODE_PURE = '1'
-  environment.OPENCODE_DISABLE_DEFAULT_PLUGINS = nil
-  environment.OPENCODE_DISABLE_PROJECT_CONFIG = '1'
-  environment.OPENCODE_DISABLE_AUTOSHARE = '1'
-  environment.NVIM_AI_EDIT_STAGE_ROOT = nil
-  environment.NVIM_AI_EDIT_STAGE_TARGET = nil
-  environment.NVIM_AI_EDIT_MAX_BYTES = nil
-  environment.NVIM_AI_EDIT_CONTEXT = nil
-  return environment, root
-end
-
 local function job_process(channel, detached)
   local process_id = vim.fn.jobpid(channel)
   return {
@@ -1170,176 +817,51 @@ local function job_process(channel, detached)
   }
 end
 
-local function job_environment(environment)
-  local result = copy_table(environment)
-  result.NVIM = ''
-  result.NVIM_LISTEN_ADDRESS = nil
-  return result
-end
-
-local function delete_session(job, session_id)
-  if job.deleted_sessions[session_id] then
+local function parse_event(job, event)
+  if type(event) ~= 'table' then
+    job.parse_error = true
+    table.insert(job.errors, 'invalid Pi event')
     return
   end
-  job.deleted_sessions[session_id] = true
-  local environment, cleanup_root = cleanup_environment(job)
-  local finished = false
-  local timer = uv.new_timer()
-  local process
-  local function close_timer()
-    timer:stop()
-    if not timer:is_closing() then
-      timer:close()
+  local update = event.assistantMessageEvent
+  if event.type == 'message_update' and type(update) == 'table' and update.type == 'text_delta' and type(update.delta) == 'string' then
+    -- Only the bounded tail is needed for the activity view; message_end owns the result.
+    job.preview = utf8_tail(job.preview .. update.delta, activity_limit.entry_bytes)
+    add_activity(job, 'Assistant:\n' .. job.preview, 'response')
+  elseif event.type == 'message_end' and type(event.message) == 'table' and event.message.role == 'assistant' then
+    local message = event.message
+    job.response_count = job.response_count + 1
+    if message.stopReason ~= 'stop' then
+      job.event_error = true
+      table.insert(job.errors, message.errorMessage or ('Pi response ended with ' .. tostring(message.stopReason)))
+      return
     end
-  end
-  local ok, channel = pcall(vim.fn.jobstart, { job.options.command, 'session', 'delete', session_id }, {
-    cwd = job.project_root,
-    env = job_environment(environment),
-    clear_env = true,
-    stdin = 'null',
-    on_exit = function(_, code)
-      vim.schedule(function()
-        vim.fn.delete(cleanup_root, 'rf')
-        if finished then
-          return
-        end
-        finished = true
-        close_timer()
-        if code ~= 0 then
-          notify('could not delete OpenCode session ' .. session_id, vim.log.levels.WARN)
-        end
-      end)
-    end,
-  })
-  if not ok or channel <= 0 then
-    close_timer()
-    vim.fn.delete(cleanup_root, 'rf')
-    notify('could not start OpenCode session cleanup for ' .. session_id, vim.log.levels.WARN)
-    return
-  end
-  process = job_process(channel, false)
-  timer:start(job.options.cleanup_timeout_ms, 0, function()
-    vim.schedule(function()
-      if finished then
+    local parts = {}
+    for _, part in ipairs(message.content or {}) do
+      if part.type == 'text' and type(part.text) == 'string' then
+        table.insert(parts, part.text)
+      elseif part.type ~= 'thinking' then
+        job.event_error = true
+        table.insert(job.errors, 'Pi returned non-text output')
         return
       end
-      finished = true
-      close_timer()
-      pcall(process.kill, process, 15)
-      local kill_timer = uv.new_timer()
-      kill_timer:start(500, 0, function()
-        pcall(process.kill, process, 9)
-        kill_timer:stop()
-        kill_timer:close()
-      end)
-      notify('OpenCode session cleanup timed out for ' .. session_id, vim.log.levels.WARN)
-    end)
-  end)
-end
-
-local function remember_session(job, value)
-  if type(value) ~= 'table' then
-    return
-  end
-  local session_id = value.sessionID or value.sessionId or value.session_id
-  if type(session_id) == 'string' and session_id ~= '' then
-    job.sessions[session_id] = true
-    if job.done then
-      delete_session(job, session_id)
     end
-  end
-  for _, nested in pairs(value) do
-    if type(nested) == 'table' then
-      remember_session(job, nested)
-    end
-  end
-end
-
-local function activity_event_key(prefix, event, part)
-  local id = part.id or part.callID or event.id
-  if type(id) == 'string' and id ~= '' then
-    return prefix .. ':' .. id
-  end
-  return nil
-end
-
-local function safe_tool_detail(job, tool, input)
-  if type(input) ~= 'table' then
-    return nil
-  end
-  if tool == 'glob' or tool == 'grep' then
-    local pattern = input.pattern
-    if type(pattern) == 'string' and pattern ~= '' then
-      pattern = redact_activity(job, pattern)
-      if not pattern:find('[private path]', 1, true) then
-        return pattern
-      end
-    end
-  elseif tool == 'stage_text' then
-    if input.action == 'submit' then
-      return 'submit edit'
-    end
-    if input.action == 'read' and (input.source == 'target' or input.source == 'context') then
-      return 'read ' .. input.source
-    end
-  end
-  return nil
-end
-
-local function present_event(job, event)
-  local part = event.part
-  if event.type == 'text' and type(part) == 'table' and type(part.text) == 'string' then
-    add_activity(job, 'Assistant:\n' .. part.text, activity_event_key('text', event, part))
-    return
-  end
-  if event.type ~= 'tool_use' or type(part) ~= 'table' or type(part.state) ~= 'table' then
-    return
-  end
-  local status = part.state.status
-  if status ~= 'completed' and status ~= 'error' then
-    return
-  end
-  local labels = {
-    read = 'read context',
-    glob = 'find files',
-    grep = 'search text',
-    stage_text = 'stage target',
-  }
-  local label = labels[part.tool]
-  if not label then
-    return
-  end
-  local detail = safe_tool_detail(job, part.tool, part.state.input)
-  local summary = 'Tool: ' .. label
-  if detail then
-    summary = summary .. ' (' .. detail .. ')'
-  end
-  summary = summary .. (status == 'error' and ' failed' or ' complete')
-  add_activity(job, summary, activity_event_key('tool', event, part))
-end
-
-local function parse_event(job, event)
-  remember_session(job, event)
-  if event.type == 'error' then
+    job.result = table.concat(parts)
+  elseif event.type == 'tool_execution_start' or event.type == 'error' then
     job.event_error = true
-    table.insert(job.errors, type(event.error) == 'string' and event.error or vim.inspect(event.error or event))
+    table.insert(job.errors, 'unexpected Pi event: ' .. event.type)
   end
-  local part = event.part
-  if type(part) == 'table' and type(part.state) == 'table' then
-    if part.state.status == 'error' then
-      job.tool_error = true
-      table.insert(job.errors, tostring(part.state.error or ('tool ' .. tostring(part.tool) .. ' failed')))
-    end
-    if part.tool == 'stage_text' and part.state.status == 'completed' and type(part.state.input) == 'table' and part.state.input.action == 'submit' then
-      job.submit_count = job.submit_count + 1
-    end
-  end
-  present_event(job, event)
 end
 
 local function consume_stdout(job, data, final)
   if data then
     job.stdout_buffer = job.stdout_buffer .. data
+    if #job.stdout_buffer > job.options.max_bytes * 12 + 65536 then
+      job.parse_error = true
+      table.insert(job.errors, 'Pi event exceeds configured size limit')
+      job.stdout_buffer = ''
+      return
+    end
   end
   while true do
     local newline = job.stdout_buffer:find('\n', 1, true)
@@ -1371,27 +893,17 @@ local function consume_stdout(job, data, final)
   end
 end
 
-local function validated_stage_result(job)
-  local status = uv.fs_lstat(job.stage_target)
-  if not status or status.type ~= 'file' then
-    return nil, 'staging target is missing or not a regular file'
+local function response_text(job)
+  if job.response_count ~= 1 or type(job.result) ~= 'string' then
+    return nil, 'expected exactly one completed Pi response'
   end
-  local resolved_root = uv.fs_realpath(job.stage_root)
-  local resolved_target = uv.fs_realpath(job.stage_target)
-  if not resolved_root or not resolved_target or resolved_target:sub(1, #resolved_root + 1) ~= resolved_root .. '/' then
-    return nil, 'staging target escaped its private root'
+  if #job.result > job.options.max_bytes then
+    return nil, 'Pi response exceeds configured size limit'
   end
-  local text, read_error = read_file(job.stage_target)
-  if not text then
-    return nil, 'cannot read staged result: ' .. tostring(read_error)
+  if job.result:find '%z' or not pcall(vim.str_utfindex, job.result) then
+    return nil, 'Pi response contains invalid buffer text'
   end
-  if #text > job.options.max_bytes then
-    return nil, 'staged result exceeds configured size limit'
-  end
-  if not pcall(vim.str_utfindex, text) then
-    return nil, 'staged result contains invalid UTF-8'
-  end
-  return text
+  return job.result
 end
 
 local function split_result(text, strip_final_newline)
@@ -1463,9 +975,6 @@ local function finish(job, outcome, result)
   end
   sync_caret()
   sync_statusline()
-  for session_id in pairs(job.sessions) do
-    delete_session(job, session_id)
-  end
 
   if outcome == 'cancelled' then
     notify('cancelled', vim.log.levels.WARN)
@@ -1473,8 +982,8 @@ local function finish(job, outcome, result)
     notify('timed out', vim.log.levels.ERROR)
   elseif outcome == 'error' then
     local details = result or table.concat(job.errors, '\n')
-    local summary = details:match '([^\n]+)' or 'OpenCode failed'
-    notify('OpenCode failed: ' .. summary, vim.log.levels.ERROR)
+    local summary = details:match '([^\n]+)' or 'Pi failed'
+    notify('Pi failed: ' .. summary, vim.log.levels.ERROR)
     show_error(details)
   elseif outcome == 'stale' then
     notify(result or 'target changed; staged result discarded', vim.log.levels.WARN)
@@ -1517,21 +1026,17 @@ local function launch_run(job)
     completed = true
     consume_stdout(job, nil, true)
     if exit_code ~= 0 then
-      table.insert(job.errors, string.format('OpenCode exited with status %d', exit_code))
+      table.insert(job.errors, string.format('Pi exited with status %d', exit_code))
     end
     local stderr = table.concat(job.stderr)
     if stderr:match '%S' then
       table.insert(job.errors, stderr)
     end
-    if exit_code ~= 0 or job.event_error or job.tool_error or job.parse_error then
+    if exit_code ~= 0 or job.event_error or job.parse_error then
       finish(job, 'error', table.concat(job.errors, '\n'))
       return
     end
-    if job.submit_count ~= 1 then
-      finish(job, 'error', string.format('expected exactly one successful stage_text submit, received %d', job.submit_count))
-      return
-    end
-    local text, stage_error = validated_stage_result(job)
+    local text, stage_error = response_text(job)
     if not text then
       finish(job, 'error', stage_error)
       return
@@ -1565,9 +1070,47 @@ local function launch_run(job)
     end)
   end
 
-  local ok, channel = pcall(vim.fn.jobstart, { job.options.command, 'run', '--agent', job.agent, '--format', 'json' }, {
-    cwd = job.project_root,
-    env = job_environment(job.environment),
+  local prompt_path = vim.api.nvim_get_runtime_file('lua/ai_edit/prompt.md', false)[1]
+  if not prompt_path then
+    finish(job, 'error', 'code-only prompt is missing')
+    return
+  end
+  local arguments = {
+    job.options.command,
+    '--print',
+    '--mode',
+    'json',
+    '--no-session',
+    '--no-tools',
+    '--no-extensions',
+    '--no-skills',
+    '--no-prompt-templates',
+    '--no-themes',
+    '--no-context-files',
+    '--no-approve',
+    '--offline',
+    '--thinking',
+    job.options.thinking,
+    '--system-prompt',
+    prompt_path,
+  }
+  if job.options.model then
+    vim.list_extend(arguments, { '--model', job.options.model })
+  end
+  vim.list_extend(arguments, { '--', '@' .. job.stage_target })
+  local request = 'Replace the entire reference file. Output its complete replacement code.'
+  if job.target.kind ~= 'whole' then
+    request = 'The reference file is read-only context. Replace only the selection at '
+      .. job.target.label
+      .. '. Output only the replacement code for this selection.'
+      .. '\nSelected text, JSON encoded:\n'
+      .. vim.json.encode(job.target_text)
+  end
+  request = request .. '\nRequest:\n' .. job.instruction
+
+  local ok, channel = pcall(vim.fn.jobstart, arguments, {
+    cwd = job.stage_root,
+    env = job.environment,
     clear_env = true,
     on_stdout = stdout_callback,
     on_stderr = stderr_callback,
@@ -1579,324 +1122,16 @@ local function launch_run(job)
     end,
   })
   if not ok or channel <= 0 then
-    finish(job, 'error', 'could not start OpenCode: ' .. tostring(channel))
+    finish(job, 'error', 'could not start Pi: ' .. tostring(channel))
     return
   end
   job.process = job_process(channel, false)
-  local sent, send_result = pcall(vim.fn.chansend, channel, job.instruction)
+  local sent, send_result = pcall(vim.fn.chansend, channel, request)
   local closed, close_result = pcall(vim.fn.chanclose, channel, 'stdin')
   if not sent or send_result == 0 or not closed or close_result == 0 then
     pcall(job.process.kill, job.process, 9)
-    finish(job, 'error', 'could not send OpenCode instruction')
+    finish(job, 'error', 'could not send Pi instruction')
   end
-end
-
-local function decode_debug_output(result, label)
-  if result.code ~= 0 then
-    return nil, label .. ' failed: ' .. tostring(result.stderr or '')
-  end
-  local ok, value = pcall(vim.json.decode, (result.stdout or ''):match '^%s*(.-)%s*$')
-  if not ok then
-    return nil, label .. ' returned invalid JSON: ' .. tostring(result.stdout)
-  end
-  return value
-end
-
-local function run_debug(job, arguments, label, callback, cwd, environment)
-  local stdout = { chunks = {}, bytes = 0, done = false }
-  local stderr = { chunks = {}, bytes = 0, done = false }
-  local output_errors = {}
-  local process_id
-  local exit_code
-  local exit_signal
-  local completed = false
-
-  local function kill_group(signal)
-    if process_id then
-      pcall(uv.kill, -process_id, signal)
-    end
-  end
-
-  local function complete()
-    if completed or exit_code == nil or not stdout.done or not stderr.done then
-      return
-    end
-    completed = true
-    vim.schedule(function()
-      local stderr_text = table.concat(stderr.chunks)
-      if #output_errors > 0 then
-        stderr_text = stderr_text .. '\n' .. table.concat(output_errors, '\n')
-      end
-      callback {
-        code = #output_errors == 0 and exit_code or 1,
-        signal = exit_signal,
-        stdout = table.concat(stdout.chunks),
-        stderr = stderr_text,
-      }
-    end)
-  end
-
-  local function capture(state, name, data)
-    if state.done then
-      return
-    end
-    if #data == 1 and data[1] == '' then
-      state.done = true
-    else
-      data = table.concat(data, '\n')
-      local remaining = debug_output_max_bytes - state.bytes
-      if #data <= remaining then
-        table.insert(state.chunks, data)
-        state.bytes = state.bytes + #data
-      else
-        if remaining > 0 then
-          table.insert(state.chunks, data:sub(1, remaining))
-          state.bytes = debug_output_max_bytes
-        end
-        table.insert(output_errors, name .. ' exceeded ' .. debug_output_max_bytes .. ' bytes')
-        state.done = true
-        kill_group(9)
-      end
-    end
-    complete()
-  end
-
-  local command = { job.options.command }
-  vim.list_extend(command, arguments)
-  local spawn_ok, channel = pcall(vim.fn.jobstart, command, {
-    cwd = cwd or job.project_root,
-    env = job_environment(environment or job.environment or vim.fn.environ()),
-    clear_env = true,
-    detach = true,
-    stdin = 'null',
-    on_stdout = function(_, data)
-      capture(stdout, 'stdout', data)
-    end,
-    on_stderr = function(_, data)
-      capture(stderr, 'stderr', data)
-    end,
-    on_exit = function(_, code)
-      exit_code = code
-      exit_signal = 0
-      complete()
-    end,
-  })
-  if not spawn_ok or channel <= 0 then
-    return nil, label .. ': ' .. tostring(channel)
-  end
-  process_id = vim.fn.jobpid(channel)
-  return job_process(channel, true)
-end
-
-local function prepare_helper(job, callback)
-  activity_phase(job, 'Preparing trusted helper')
-  local info, info_error = helper_source(job.options.command, job.opencode_version)
-  if not info then
-    callback(nil, info_error)
-    return
-  end
-  local verified = verify_helper_cache(info.cache, info.source, info.version)
-  if verified then
-    local sealed, seal_error = seal_helper_cache(info.root)
-    callback(sealed and info.cache or nil, seal_error)
-    return
-  end
-
-  local build, build_error = materialize_helper_build(info)
-  if not build then
-    callback(nil, build_error)
-    return
-  end
-  job.helper_build = build.root
-  local bootstrap_config = copy_table(job.config)
-  bootstrap_config.model = 'opencode/big-pickle'
-  local environment = isolated_environment(job, build.cache, bootstrap_config, 'bootstrap')
-  local process, start_error = run_debug(job, { 'debug', 'agent', job.agent }, 'OpenCode helper bootstrap', function(result)
-    if job.done then
-      discard_helper_build(build.root)
-      return
-    end
-    if result.code ~= 0 then
-      discard_helper_build(build.root)
-      job.helper_build = nil
-      callback(nil, 'helper dependency bootstrap failed: ' .. tostring(result.stderr or ''))
-      return
-    end
-    local valid, validation_error = verify_helper_cache(build.cache, info.source, info.version)
-    if not valid then
-      discard_helper_build(build.root)
-      job.helper_build = nil
-      callback(nil, validation_error)
-      return
-    end
-    -- macOS refuses to rename a read-only source directory. Seal the cache
-    -- contents first, then seal the writable publication root after rename.
-    local sealed, seal_error = seal_helper_cache(build.cache)
-    if not sealed then
-      discard_helper_build(build.root)
-      job.helper_build = nil
-      callback(nil, 'cannot seal trusted helper cache: ' .. tostring(seal_error))
-      return
-    end
-    local published, publish_error = uv.fs_rename(build.root, info.root)
-    if not published then
-      discard_helper_build(build.root)
-      local winner_valid, winner_error = verify_helper_cache(info.cache, info.source, info.version)
-      if not winner_valid then
-        job.helper_build = nil
-        callback(nil, 'cannot publish trusted helper cache: ' .. tostring(publish_error or winner_error))
-        return
-      end
-    end
-    sealed, seal_error = seal_helper_cache(info.root)
-    if not sealed then
-      job.helper_build = nil
-      callback(nil, 'cannot seal published helper cache: ' .. tostring(seal_error))
-      return
-    end
-    job.helper_build = nil
-    callback(info.cache)
-  end, job.project_root, environment)
-  if not process then
-    vim.fn.delete(build.root, 'rf')
-    job.helper_build = nil
-    callback(nil, 'could not start helper dependency bootstrap: ' .. tostring(start_error))
-    return
-  end
-  job.process = process
-end
-
-local function preflight_agent(job)
-  activity_phase(job, 'Checking edit agent')
-  local process, start_error = run_debug(job, { 'debug', 'agent', job.agent }, 'OpenCode agent preflight', function(result)
-    if job.done then
-      return
-    end
-    local agent, decode_error = decode_debug_output(result, 'OpenCode agent preflight')
-    if not agent then
-      finish(job, 'error', decode_error)
-      return
-    end
-    local safe, safety_error = validate_resolved_agent(agent, job.agent, job.options.model, job.options.variant)
-    if not safe then
-      finish(job, 'error', 'unsafe OpenCode agent configuration: ' .. safety_error)
-      return
-    end
-    launch_run(job)
-  end)
-  if not process then
-    finish(job, 'error', 'could not start OpenCode agent preflight: ' .. tostring(start_error))
-    return
-  end
-  job.process = process
-end
-
-local preflight_config
-
-local provider_config_fields = { 'model', 'small_model', 'provider', 'enabled_providers', 'disabled_providers' }
-
-local function preflight_global_config(job)
-  activity_phase(job, 'Resolving global configuration')
-  local environment = global_config_environment(job)
-  local process, start_error = run_debug(job, { 'debug', 'config' }, 'OpenCode global config resolution', function(result)
-    if job.done then
-      return
-    end
-    local config, decode_error = decode_debug_output(result, 'OpenCode global config resolution')
-    if not config then
-      finish(job, 'error', decode_error)
-      return
-    end
-    local safe, safety_error = validate_resolved_config(config)
-    if not safe then
-      finish(job, 'error', 'unsafe OpenCode configuration: ' .. safety_error)
-      return
-    end
-    if type(config.model) ~= 'string' or not config.model:match '^([^/]+)/' then
-      finish(job, 'error', 'unsafe OpenCode configuration: resolved model/provider is unavailable')
-      return
-    end
-    for _, field in ipairs(provider_config_fields) do
-      if config[field] ~= nil then
-        job.config[field] = copy_table(config[field])
-      end
-    end
-    prepare_helper(job, function(cache, cache_error)
-      if job.done then
-        return
-      end
-      if not cache then
-        finish(job, 'error', 'dependency bootstrap failed: ' .. tostring(cache_error))
-        return
-      end
-      job.cache = cache
-      job.environment = runtime_environment(job)
-      preflight_config(job)
-    end)
-  end, job.project_root, environment)
-  if not process then
-    finish(job, 'error', 'could not start OpenCode global config resolution: ' .. tostring(start_error))
-    return
-  end
-  job.process = process
-end
-
-local function preflight_version(job)
-  activity_phase(job, 'Checking OpenCode version')
-  local process, start_error = run_debug(job, { '--version' }, 'OpenCode version preflight', function(result)
-    if job.done then
-      return
-    end
-    if result.code ~= 0 then
-      finish(job, 'error', 'OpenCode version preflight failed: ' .. tostring(result.stderr or ''))
-      return
-    end
-    local version = (result.stdout or ''):match '^%s*(.-)%s*$'
-    if not version_policy.supported(version) then
-      finish(job, 'error', 'unsupported OpenCode version: expected ' .. version_policy.range .. ', resolved ' .. tostring(version))
-      return
-    end
-    job.opencode_version = version
-    preflight_global_config(job)
-  end)
-  if not process then
-    finish(job, 'error', 'could not start OpenCode version preflight: ' .. tostring(start_error))
-    return
-  end
-  job.process = process
-end
-
-preflight_config = function(job)
-  activity_phase(job, 'Checking runtime configuration')
-  local process, start_error = run_debug(job, { 'debug', 'config' }, 'OpenCode dependency/config preflight', function(result)
-    if job.done then
-      return
-    end
-    local config, decode_error = decode_debug_output(result, 'OpenCode dependency/config preflight')
-    if not config then
-      finish(job, 'error', decode_error)
-      return
-    end
-    local safe, safety_error = validate_resolved_config(config)
-    if not safe then
-      finish(job, 'error', 'unsafe OpenCode configuration: ' .. safety_error)
-      return
-    end
-    if type(config.model) ~= 'string' then
-      finish(job, 'error', 'unsafe OpenCode configuration: resolved model/provider is unavailable')
-      return
-    end
-    if not config.model:match '^([^/]+)/' then
-      finish(job, 'error', 'unsafe OpenCode configuration: resolved model has no provider')
-      return
-    end
-    preflight_agent(job)
-  end)
-  if not process then
-    finish(job, 'error', 'could not start OpenCode config preflight: ' .. tostring(start_error))
-    return
-  end
-  job.process = process
 end
 
 local function start_job(snapshot, instruction)
@@ -1923,7 +1158,6 @@ local function start_job(snapshot, instruction)
     buffer = buffer,
     target_window = snapshot.window,
     path = snapshot.path,
-    project_root = project_root(snapshot.path),
     full_text = snapshot.text,
     target_text = snapshot.target_text,
     target = snapshot.target,
@@ -1932,12 +1166,11 @@ local function start_job(snapshot, instruction)
     instruction = instruction,
     options = copy_table(options),
     agent = 'nvim-ai-edit-' .. random_id(),
-    sessions = {},
-    deleted_sessions = {},
     errors = {},
     stderr = {},
     stdout_buffer = '',
-    submit_count = 0,
+    response_count = 0,
+    preview = '',
   }
   jobs[buffer] = job
   local locked, lock_error = acquire_target_lock(job)
@@ -1958,7 +1191,6 @@ local function start_job(snapshot, instruction)
     finish(job, 'error', staging_error)
     return
   end
-  job.config = restricted_config(job)
   job.timer = uv.new_timer()
   job.timer:start(job.options.timeout_ms, 0, function()
     vim.schedule(function()
@@ -1966,7 +1198,7 @@ local function start_job(snapshot, instruction)
     end)
   end)
   notify 'running'
-  preflight_version(job)
+  launch_run(job)
 end
 
 local function close_window(window)
@@ -2255,7 +1487,7 @@ local function invoke(mode)
     return
   end
   if vim.fn.executable(options.command) ~= 1 then
-    notify('OpenCode executable not found: ' .. options.command, vim.log.levels.ERROR)
+    notify('Pi executable not found: ' .. options.command, vim.log.levels.ERROR)
     return
   end
   local target = { kind = 'whole', label = nil }
@@ -2294,9 +1526,9 @@ local function validate_options(overrides)
     keymap = true,
     command = true,
     model = true,
-    variant = true,
+    thinking = true,
+    config_dir = true,
     timeout_ms = true,
-    cleanup_timeout_ms = true,
     max_bytes = true,
     width = true,
     height = true,
@@ -2316,13 +1548,14 @@ local function validate_options(overrides)
   if overrides.model ~= false and (type(overrides.model) ~= 'string' or not overrides.model:match '^[^/]+/.+$') then
     error 'ai_edit: model must be false or provider/model text'
   end
-  if overrides.variant ~= false and (type(overrides.variant) ~= 'string' or overrides.variant == '') then
-    error 'ai_edit: variant must be false or non-empty text'
+  if type(overrides.config_dir) ~= 'string' or overrides.config_dir == '' then
+    error 'ai_edit: config_dir must be a non-empty directory path'
   end
-  if overrides.variant and not overrides.model then
-    error 'ai_edit: variant requires model'
+  local levels = { off = true, minimal = true, low = true, medium = true, high = true, xhigh = true, max = true }
+  if type(overrides.thinking) ~= 'string' or not levels[overrides.thinking] then
+    error 'ai_edit: thinking must be off, minimal, low, medium, high, xhigh, or max'
   end
-  for _, key in ipairs { 'timeout_ms', 'cleanup_timeout_ms', 'max_bytes' } do
+  for _, key in ipairs { 'timeout_ms', 'max_bytes' } do
     if type(overrides[key]) ~= 'number' or overrides[key] <= 0 or overrides[key] % 1 ~= 0 then
       error('ai_edit: ' .. key .. ' must be a positive integer')
     end
@@ -2442,6 +1675,7 @@ function M.setup(overrides)
   options = configured
   status_frame = 1
   health_state.command = options.command
+  health_state.config_dir = options.config_dir
   setup_running_view()
 
   vim.keymap.set('n', options.keymap, function()
